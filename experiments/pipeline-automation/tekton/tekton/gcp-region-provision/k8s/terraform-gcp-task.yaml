@@ -1,0 +1,83 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: terraform-gcp
+  labels:
+    app.kubernetes.io/version: "1.0"
+  annotations:
+    tekton.dev/categories: Infrastructure
+    tekton.dev/tags: terraform, gcp
+    tekton.dev/displayName: "Terraform with GCP credentials"
+spec:
+  description: >-
+    Run Terraform commands with GCP authentication.
+
+    This task wraps the Terraform CLI and automatically configures GCP credentials
+    from a Kubernetes secret containing a service account key file.
+
+  workspaces:
+    - name: source
+      description: Workspace containing Terraform configurations
+
+  params:
+    - name: terraform-dir
+      description: Directory containing Terraform files (relative to workspace)
+      type: string
+      default: "."
+
+    - name: command
+      description: Terraform command to run (init, validate, plan, apply, destroy)
+      type: string
+
+    - name: args
+      description: Additional arguments for the terraform command
+      type: string
+      default: ""
+
+    - name: gcp-credentials-secret
+      description: Name of the Kubernetes secret containing GCP service account key
+      type: string
+      default: "gcp-credentials"
+
+    - name: image
+      description: Terraform image to use
+      type: string
+      default: "hashicorp/terraform:1.6"
+
+  steps:
+    - name: terraform
+      image: $(params.image)
+      workingDir: $(workspaces.source.path)/$(params.terraform-dir)
+      env:
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: /var/secrets/gcp/key.json
+      volumeMounts:
+        - name: gcp-credentials
+          mountPath: /var/secrets/gcp
+          readOnly: true
+      script: |
+        #!/bin/sh
+        set -e
+
+        echo "=== Terraform $(params.command) ==="
+        echo "Working directory: $(workspaces.source.path)/$(params.terraform-dir)"
+        echo "GCP credentials: $GOOGLE_APPLICATION_CREDENTIALS"
+
+        # Verify credentials exist
+        if [ ! -f "$GOOGLE_APPLICATION_CREDENTIALS" ]; then
+          echo "ERROR: GCP credentials not found at $GOOGLE_APPLICATION_CREDENTIALS"
+          exit 1
+        fi
+        echo "✓ GCP credentials found"
+
+        # Run terraform command
+        if [ -n "$(params.args)" ]; then
+          terraform $(params.command) $(params.args)
+        else
+          terraform $(params.command)
+        fi
+
+  volumes:
+    - name: gcp-credentials
+      secret:
+        secretName: $(params.gcp-credentials-secret)

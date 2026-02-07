@@ -1,0 +1,384 @@
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: gcp-region-provisioning-pipeline
+spec:
+  # Shared workspace for all tasks to persist state
+  workspaces:
+    - name: shared-data
+      description: "Workspace to share data between tasks"
+
+  params:
+    - name: environment
+      type: string
+      description: "Target environment (production, staging, integration)"
+    - name: region
+      type: string
+      description: "GCP region to provision (e.g., us-central1)"
+    - name: sector
+      type: string
+      description: "Deployment sector (e.g., canary, main)"
+
+  tasks:
+    - name: validate-inputs
+      workspaces:
+        - name: source
+          workspace: shared-data
+      taskSpec:
+        workspaces:
+          - name: source
+        params:
+          - name: environment
+          - name: region
+          - name: sector
+        steps:
+          - name: validate
+            image: alpine:latest
+            script: |
+              #!/bin/sh
+              set -e
+
+              echo "=== Validating Input Parameters ==="
+
+              # Validate environment
+              case "$(params.environment)" in
+                production|staging|integration)
+                  echo "✓ Environment: $(params.environment)"
+                  ;;
+                *)
+                  echo "✗ Invalid environment: $(params.environment)"
+                  echo "  Allowed values: production, staging, integration"
+                  exit 1
+                  ;;
+              esac
+
+              # Validate region format
+              if [ -z "$(params.region)" ]; then
+                echo "✗ Region cannot be empty"
+                exit 1
+              fi
+              echo "✓ Region: $(params.region)"
+
+              # Validate sector length
+              SECTOR_LEN=$(echo -n "$(params.sector)" | wc -c)
+              if [ "$SECTOR_LEN" -gt 40 ]; then
+                echo "✗ Sector exceeds 40 characters: $(params.sector) ($SECTOR_LEN chars)"
+                exit 1
+              fi
+              if [ -z "$(params.sector)" ]; then
+                echo "✗ Sector cannot be empty"
+                exit 1
+              fi
+              echo "✓ Sector: $(params.sector) ($SECTOR_LEN chars)"
+
+              echo "=== All validations passed ==="
+      params:
+        - name: environment
+          value: $(params.environment)
+        - name: region
+          value: $(params.region)
+        - name: sector
+          value: $(params.sector)
+
+    - name: create-directory-structure
+      runAfter:
+        - validate-inputs
+      workspaces:
+        - name: source
+          workspace: shared-data
+      taskSpec:
+        workspaces:
+          - name: source
+        params:
+          - name: environment
+          - name: region
+          - name: sector
+        steps:
+          - name: create-dirs
+            image: alpine/git:latest
+            workingDir: $(workspaces.source.path)
+            script: |
+              #!/bin/sh
+              set -e
+
+              echo "=== Creating Directory Structure ==="
+
+              TARGET_PATH="config/region/$(params.environment)/$(params.sector)/$(params.region)"
+
+              echo "Creating directory: $TARGET_PATH"
+              mkdir -p "$TARGET_PATH"
+
+              echo "✓ Directory structure created successfully"
+              ls -la config/region/$(params.environment)/$(params.sector)/
+      params:
+        - name: environment
+          value: $(params.environment)
+        - name: region
+          value: $(params.region)
+        - name: sector
+          value: $(params.sector)
+
+    - name: generate-terraform-config
+      runAfter:
+        - create-directory-structure
+      workspaces:
+        - name: source
+          workspace: shared-data
+      taskSpec:
+        workspaces:
+          - name: source
+        params:
+          - name: environment
+          - name: region
+          - name: sector
+        steps:
+          - name: create-terraform-files
+            image: alpine/git:latest
+            workingDir: $(workspaces.source.path)
+            script: |
+              #!/bin/sh
+              set -e
+
+              echo "=== Generating Terraform Configuration ==="
+
+              TARGET_PATH="config/region/$(params.environment)/$(params.sector)/$(params.region)"
+
+              # Ensure directory exists (in case previous task didn't persist)
+              echo "Creating directory: $TARGET_PATH"
+              mkdir -p "$TARGET_PATH"
+
+              # Create main.tf
+              cat > "$TARGET_PATH/main.tf" <<'EOF'
+              # Auto-generated Terraform configuration
+              # Environment: $(params.environment)
+              # Region: $(params.region)
+              # Sector: $(params.sector)
+
+              terraform {
+                required_version = ">= 1.0"
+
+                required_providers {
+                  google = {
+                    source  = "hashicorp/google"
+                    version = "~> 5.0"
+                  }
+                  random = {
+                    source  = "hashicorp/random"
+                    version = "~> 3.5"
+                  }
+                }
+              }
+
+              provider "google" {
+                project = "<YOUR-PROJECT-ID>"
+                region  = "$(params.region)"
+              }
+
+              # Generate a random suffix for bucket name (must be globally unique)
+              resource "random_id" "bucket_suffix" {
+                byte_length = 4
+              }
+
+              # Create a GCS bucket
+              resource "google_storage_bucket" "test_bucket" {
+                name          = "tekton-test-$(params.environment)-$(params.sector)-${random_id.bucket_suffix.hex}"
+                location      = "$(params.region)"
+                force_destroy = true
+
+                uniform_bucket_level_access = true
+
+                labels = {
+                  environment = "$(params.environment)"
+                  sector      = "$(params.sector)"
+                  region      = "$(params.region)"
+                  created_by  = "tekton"
+                }
+
+                lifecycle_rule {
+                  condition {
+                    age = 30
+                  }
+                  action {
+                    type = "Delete"
+                  }
+                }
+              }
+
+              output "bucket_name" {
+                description = "Name of the created GCS bucket"
+                value       = google_storage_bucket.test_bucket.name
+              }
+
+              output "bucket_url" {
+                description = "URL of the created GCS bucket"
+                value       = google_storage_bucket.test_bucket.url
+              }
+              EOF
+
+              # Create variables.tf
+              cat > "$TARGET_PATH/variables.tf" <<'EOF'
+              variable "environment" {
+                description = "Deployment environment"
+                type        = string
+                default     = "$(params.environment)"
+              }
+
+              variable "region" {
+                description = "GCP region"
+                type        = string
+                default     = "$(params.region)"
+              }
+
+              variable "sector" {
+                description = "Deployment sector"
+                type        = string
+                default     = "$(params.sector)"
+              }
+              EOF
+
+              echo "✓ Terraform files created:"
+              ls -lh "$TARGET_PATH"
+
+              echo ""
+              echo "--- main.tf content ---"
+              cat "$TARGET_PATH/main.tf"
+      params:
+        - name: environment
+          value: $(params.environment)
+        - name: region
+          value: $(params.region)
+        - name: sector
+          value: $(params.sector)
+
+    - name: commit-to-git
+      runAfter:
+        - generate-terraform-config
+      workspaces:
+        - name: source
+          workspace: shared-data
+      taskSpec:
+        workspaces:
+          - name: source
+        params:
+          - name: environment
+          - name: region
+          - name: sector
+        steps:
+          - name: mock-git-commit
+            image: alpine/git:latest
+            workingDir: $(workspaces.source.path)
+            script: |
+              #!/bin/sh
+              set -e
+
+              echo "=== Committing to Git (MOCK) ==="
+
+              TARGET_PATH="config/region/$(params.environment)/$(params.sector)/$(params.region)"
+
+              # Mock git operations
+              echo "Configuring git..."
+              echo "✓ Git user configured"
+
+              echo ""
+              echo "Staging changes..."
+              echo "  git add $TARGET_PATH"
+              echo "✓ Changes staged"
+
+              echo ""
+              echo "Creating commit..."
+              COMMIT_MSG="Add GCP region configuration
+
+              Environment: $(params.environment)
+              Region: $(params.region)
+              Sector: $(params.sector)
+
+              Auto-generated by Tekton pipeline"
+
+              echo "  git commit -m \"$COMMIT_MSG\""
+              echo "✓ Commit created [abc123def]"
+
+              echo ""
+              echo "Pushing to remote..."
+              echo "  git push origin main"
+              echo "✓ Changes pushed to remote repository"
+
+              echo ""
+              echo "=== Region Provisioning Complete ==="
+              echo "Environment: $(params.environment)"
+              echo "Region: $(params.region)"
+              echo "Sector: $(params.sector)"
+              echo "Path: $TARGET_PATH"
+      params:
+        - name: environment
+          value: $(params.environment)
+        - name: region
+          value: $(params.region)
+        - name: sector
+          value: $(params.sector)
+
+    # Terraform Init
+    - name: terraform-init
+      runAfter:
+        - generate-terraform-config
+      taskRef:
+        name: terraform-gcp
+      workspaces:
+        - name: source
+          workspace: shared-data
+      params:
+        - name: terraform-dir
+          value: "config/region/$(params.environment)/$(params.sector)/$(params.region)"
+        - name: command
+          value: "init"
+        - name: args
+          value: "-backend=false"
+
+    # Terraform Validate
+    - name: terraform-validate
+      runAfter:
+        - terraform-init
+      taskRef:
+        name: terraform-gcp
+      workspaces:
+        - name: source
+          workspace: shared-data
+      params:
+        - name: terraform-dir
+          value: "config/region/$(params.environment)/$(params.sector)/$(params.region)"
+        - name: command
+          value: "validate"
+
+    # Terraform Plan
+    - name: terraform-plan
+      runAfter:
+        - terraform-validate
+      taskRef:
+        name: terraform-gcp
+      workspaces:
+        - name: source
+          workspace: shared-data
+      params:
+        - name: terraform-dir
+          value: "config/region/$(params.environment)/$(params.sector)/$(params.region)"
+        - name: command
+          value: "plan"
+        - name: args
+          value: "-out=tfplan"
+
+    # Terraform Apply
+    - name: terraform-apply
+      runAfter:
+        - terraform-plan
+      taskRef:
+        name: terraform-gcp
+      workspaces:
+        - name: source
+          workspace: shared-data
+      params:
+        - name: terraform-dir
+          value: "config/region/$(params.environment)/$(params.sector)/$(params.region)"
+        - name: command
+          value: "apply"
+        - name: args
+          value: "-auto-approve tfplan"
+

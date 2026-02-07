@@ -1,0 +1,49 @@
+apiVersion: hypershift.openshift.io/v1beta1
+kind: HostedCluster
+metadata:
+  name: ${hosted_cluster_name}
+  namespace: clusters
+spec:
+  release:
+    image: quay.io/openshift-release-dev/ocp-release:4.14.0-x86_64
+  
+  platform:
+    type: None
+  
+  pullSecret:
+    name: pull-secret
+  
+  sshKey:
+    name: ssh-key
+  
+  networking:
+    clusterNetwork:
+    - cidr: 10.132.0.0/14
+    serviceNetwork:
+    - cidr: 172.31.0.0/16
+    networkType: OVNKubernetes
+  
+  services:
+  - service: APIServer
+    servicePublishingStrategy:
+      type: LoadBalancer
+  - service: OAuthServer  
+    servicePublishingStrategy:
+      type: NodePort
+      nodePort:
+        address: 0.0.0.0
+        port: 30081
+  - service: Konnectivity
+    servicePublishingStrategy:
+      type: LoadBalancer
+  - service: Ignition
+    servicePublishingStrategy:
+      type: NodePort
+      nodePort:
+        address: ${ignition_server_ip}
+        port: 30080
+
+  infraID: ${infraid}
+  
+  dns:
+    baseDomain: ${hosted_cluster_domain}

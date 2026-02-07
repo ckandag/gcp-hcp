@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hypershift-autopilot-webhook
+  namespace: hypershift-webhooks
+  labels:
+    app: hypershift-autopilot-webhook
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hypershift-autopilot-webhook
+  template:
+    metadata:
+      labels:
+        app: hypershift-autopilot-webhook
+    spec:
+      serviceAccountName: hypershift-autopilot-webhook
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: webhook
+        image: nginx:alpine
+        command: ["/bin/sh"]
+        args:
+        - -c 
+        - |
+          # Create a simple webhook server that allows all requests
+          cat > /tmp/webhook.html << 'EOF'
+          #!/bin/sh
+          echo "Content-Type: application/json"
+          echo ""
+          echo '{"apiVersion":"admission.k8s.io/v1","kind":"AdmissionReview","response":{"uid":"'$1'","allowed":true}}'
+          EOF
+          chmod +x /tmp/webhook.html
+          # Start nginx with webhook configuration
+          cat > /etc/nginx/nginx.conf << 'EOF'
+          events {}
+          http {
+            server {
+              listen 8443 ssl;
+              ssl_certificate /etc/certs/tls.crt;
+              ssl_certificate_key /etc/certs/tls.key;
+              location /mutate {
+                add_header Content-Type application/json;
+                return 200 '{"apiVersion":"admission.k8s.io/v1","kind":"AdmissionReview","response":{"allowed":true}}';
+              }
+              location /health {
+                add_header Content-Type text/plain;
+                return 200 'OK';
+              }
+            }
+          }
+          EOF
+          nginx -g 'daemon off;'
+        ports:
+        - containerPort: 8443
+          name: https
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: false
+          runAsNonRoot: true
+          runAsUser: 1001
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+            ephemeral-storage: 1Gi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+            ephemeral-storage: 1Gi
+        volumeMounts:
+        - name: certs
+          mountPath: /etc/certs
+          readOnly: true
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8443
+            scheme: HTTPS
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8443
+            scheme: HTTPS
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: certs
+        secret:
+          secretName: hypershift-autopilot-webhook-certs

@@ -1,0 +1,56 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: test-gcp-auth
+  namespace: default
+spec:
+  steps:
+    - name: test-gcloud
+      image: google/cloud-sdk:slim
+      env:
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: /var/secrets/gcp/key.json
+      volumeMounts:
+        - name: gcp-credentials
+          mountPath: /var/secrets/gcp
+          readOnly: true
+      script: |
+        #!/bin/bash
+        set -e
+
+        echo "=== Testing GCP Authentication ==="
+
+        # Activate service account
+        gcloud auth activate-service-account --key-file=$GOOGLE_APPLICATION_CREDENTIALS
+
+        # Show active account
+        echo ""
+        echo "Active account:"
+        gcloud auth list
+
+        # Show project info
+        echo ""
+        echo "Project info:"
+        gcloud config get-value project
+
+        # List compute zones (requires compute.admin permission)
+        echo ""
+        echo "Testing compute API access:"
+        gcloud compute zones list --limit=5
+
+        echo ""
+        echo "✓ GCP authentication working!"
+  volumes:
+    - name: gcp-credentials
+      secret:
+        secretName: gcp-credentials
+---
+apiVersion: tekton.dev/v1
+kind: TaskRun
+metadata:
+  name: test-gcp-auth-run
+  namespace: default
+spec:
+  serviceAccountName: tekton-gcp-deployer
+  taskRef:
+    name: test-gcp-auth

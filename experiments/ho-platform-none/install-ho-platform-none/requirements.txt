@@ -1,0 +1,11 @@
+# HyperShift GKE Installer Requirements
+# Python 3.7+ required
+
+# Core dependencies for YAML processing
+PyYAML>=6.0
+
+# Optional: Enhanced command line argument handling
+argparse>=1.4.0
+
+# Optional: Better date/time handling
+python-dateutil>=2.8.0

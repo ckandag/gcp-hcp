@@ -1,0 +1,175 @@
+# gcp-region-e2e-workflow-simple.yaml
+# Cloud Workflows version WITHOUT logging calls (works without extra IAM permissions)
+# Same 7-step workflow: git-clone → init → validate → plan → apply → e2e-tests → destroy
+# NOTE: This is a MOCK version - all steps run in a single Cloud Build for workspace sharing
+
+main:
+  params: [input]
+  steps:
+    - init_params:
+        assign:
+          - terraform_dir: ${default(map.get(input, "terraform-dir"), "environments/int/region/us-central1")}
+          - git_url: ${default(map.get(input, "git-url"), "<YOUR-TERRAFORM-REPO-URL>")}
+          - git_revision: ${default(map.get(input, "git-revision"), "main")}
+          - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - region: "us-central1"
+
+    - run_e2e_pipeline:
+        call: googleapis.cloudbuild.v1.projects.builds.create
+        args:
+          projectId: ${project_id}
+          body:
+            steps:
+              # Step 1: Git Clone
+              - name: gcr.io/cloud-builders/git
+                id: git-clone
+                args:
+                  - clone
+                  - --branch
+                  - ${git_revision}
+                  - --single-branch
+                  - --depth
+                  - "1"
+                  - ${git_url}
+                  - repo
+
+              # Step 2: Terraform Init
+              - name: hashicorp/terraform:1.9
+                id: terraform-init
+                dir: ${"repo/" + terraform_dir}
+                args:
+                  - init
+                  - -backend=false
+                waitFor:
+                  - git-clone
+
+              # Step 3: Terraform Validate
+              - name: hashicorp/terraform:1.9
+                id: terraform-validate
+                dir: ${"repo/" + terraform_dir}
+                args:
+                  - validate
+                waitFor:
+                  - terraform-init
+
+              # Step 4: Terraform Plan
+              - name: hashicorp/terraform:1.9
+                id: terraform-plan
+                dir: ${"repo/" + terraform_dir}
+                args:
+                  - plan
+                  - -out=tfplan
+                waitFor:
+                  - terraform-validate
+
+              # Step 5: Terraform Apply (MOCK - actually just shows the plan)
+              - name: hashicorp/terraform:1.9
+                id: terraform-apply
+                dir: ${"repo/" + terraform_dir}
+                entrypoint: sh
+                args:
+                  - -c
+                  - |
+                    echo "=== MOCK APPLY ==="
+                    echo "In a real scenario, this would run: terraform apply -auto-approve tfplan"
+                    echo "Skipping actual apply to avoid creating resources"
+                    echo "=== MOCK APPLY COMPLETE ==="
+                waitFor:
+                  - terraform-plan
+
+              # Step 6: Run E2E Tests (Mock)
+              - name: alpine:latest
+                id: e2e-tests
+                dir: ${"repo/" + terraform_dir}
+                entrypoint: sh
+                args:
+                  - -c
+                  - |
+                    echo "=== Running E2E Tests (MOCK) ==="
+                    echo ""
+                    echo "Running test suite..."
+                    sleep 2
+
+                    echo "✓ Test 1: Verify infrastructure connectivity"
+                    sleep 1
+
+                    echo "✓ Test 2: Check resource availability"
+                    sleep 1
+
+                    echo "✓ Test 3: Validate network configuration"
+                    sleep 1
+
+                    echo "✓ Test 4: Run integration tests"
+                    sleep 1
+
+                    echo ""
+                    echo "=== All E2E Tests Passed ==="
+                waitFor:
+                  - terraform-apply
+
+              # Step 7: Terraform Destroy (MOCK)
+              - name: hashicorp/terraform:1.9
+                id: terraform-destroy
+                dir: ${"repo/" + terraform_dir}
+                entrypoint: sh
+                args:
+                  - -c
+                  - |
+                    echo "=== MOCK DESTROY ==="
+                    echo "In a real scenario, this would run: terraform destroy -auto-approve"
+                    echo "Skipping actual destroy since we didn't create resources"
+                    echo "=== MOCK DESTROY COMPLETE ==="
+                waitFor:
+                  - e2e-tests
+
+            timeout: 3600s
+        result: build_result
+
+    - wait_for_completion:
+        call: await_build_completion
+        args:
+          project_id: ${project_id}
+          build_id: ${build_result.metadata.build.id}
+        result: final_status
+
+    - return_results:
+        return:
+          status: SUCCESS
+          build_id: ${build_result.metadata.build.id}
+          build_status: ${final_status}
+
+await_build_completion:
+  params: [project_id, build_id]
+  steps:
+    - get_build:
+        call: googleapis.cloudbuild.v1.projects.builds.get
+        args:
+          projectId: ${project_id}
+          id: ${build_id}
+        result: build
+
+    - check_status:
+        switch:
+          - condition: ${build.status == "SUCCESS"}
+            return: SUCCESS
+          - condition: ${build.status == "FAILURE"}
+            raise: "Build failed"
+          - condition: ${build.status == "TIMEOUT"}
+            raise: "Build timed out"
+          - condition: ${build.status == "CANCELLED"}
+            raise: "Build was cancelled"
+
+    - wait:
+        call: sys.sleep
+        args:
+          seconds: 10
+
+    - retry:
+        call: await_build_completion
+        args:
+          project_id: ${project_id}
+          build_id: ${build_id}
+        result: final_status
+
+    - return_status:
+        return: ${final_status}

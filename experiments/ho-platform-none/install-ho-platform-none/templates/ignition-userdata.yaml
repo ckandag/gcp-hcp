@@ -1,0 +1,35 @@
+{
+  "ignition": {
+    "version": "3.2.0",
+    "security": {
+      "tls": {
+        "certificateAuthorities": [
+          {
+            "source": "data:text/plain;base64,${ignition_ca_cert}"
+          }
+        ]
+      }
+    },
+    "config": {
+      "merge": [
+        {
+          "source": "https://${ignition_server_ip}:30080/ignition",
+          "httpHeaders": [
+            {
+              "name": "Authorization",
+              "value": "Bearer ${auth_token}"
+            },
+            {
+              "name": "NodePool",
+              "value": "clusters/${hosted_cluster_name}-workers"
+            },
+            {
+              "name": "TargetConfigVersionHash",
+              "value": "${target_config_hash}"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

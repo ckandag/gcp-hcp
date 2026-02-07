@@ -1,0 +1,25 @@
+# gcpctl Configuration File Example
+# Copy this file to ~/.gcpctl/config.yaml or specify with --config flag
+
+# Tekton webhook URL (for triggering pipelines)
+# Default: http://localhost:8080
+tekton_url: http://localhost:8080
+
+# Tekton API URL (for querying pipeline status)
+# Default: http://localhost:9097
+tekton_api_url: http://localhost:9097
+
+# Tekton Dashboard URL (optional, for displaying links)
+# Leave empty if not using Tekton Dashboard
+# Example: http://tekton-dashboard.example.com
+tekton_dashboard_url: ""
+
+# Enable verbose output
+# Default: false
+verbose: false
+
+# You can also use environment variables:
+# export GCPCTL_TEKTON_URL=http://tekton.example.com:8080
+# export GCPCTL_TEKTON_API_URL=http://tekton.example.com:8080
+# export GCPCTL_TEKTON_DASHBOARD_URL=http://tekton-dashboard.example.com
+# export GCPCTL_VERBOSE=true

@@ -1,0 +1,127 @@
+# HostedCluster with Identity Platform OIDC + Cloud Function Token Exchange
+# Name: idp-oidc
+#
+# This uses Google Identity Platform as the OIDC provider instead of accounts.google.com.
+# The Cloud Function exchanges gcloud tokens for IDP tokens with IAM role claims.
+#
+# Authentication flow:
+# 1. User runs: gcloud auth print-identity-token
+# 2. CLI calls Cloud Function /exchange with the token
+# 3. Cloud Function returns IDP token with gcp.iam.roles claim
+# 4. User authenticates to cluster with IDP token
+#
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: clusters-idp-oidc
+---
+apiVersion: hypershift.openshift.io/v1beta1
+kind: HostedCluster
+metadata:
+  annotations:
+    hypershift.openshift.io/control-plane-operator-image: <CONTROL-PLANE-OPERATOR-IMAGE>
+    hypershift.openshift.io/pod-security-admission-label-override: baseline
+    hypershift.openshift.io/skip-kas-conflict-san-validation: "true"
+  name: idp-oidc
+  namespace: clusters-idp-oidc
+spec:
+  autoscaling:
+    scaling: ScaleUpAndScaleDown
+  capabilities:
+    disabled:
+    - ImageRegistry
+  configuration:
+    apiServer:
+      audit:
+        profile: Default
+      clientCA:
+        name: ""
+      encryption: {}
+    # Identity Platform OIDC Authentication
+    # Uses tokens from Cloud Function that include gcp.iam.roles claim
+    authentication:
+      type: OIDC
+      oidcProviders:
+        - name: gcp-identity-platform
+          issuer:
+            # Identity Platform issuer URL (securetoken.google.com/<project-id>)
+            issuerURL: https://securetoken.google.com/<YOUR-PROJECT-ID>
+            audiences:
+              # Project ID is the audience for Identity Platform tokens
+              - "<YOUR-PROJECT-ID>"
+          claimMappings:
+            username:
+              claim: email
+            groups:
+              # Custom claim set by Cloud Function with IAM role mappings
+              claim: gcp.iam.roles
+  controllerAvailabilityPolicy: SingleReplica
+  # DNS domain - adjust based on your management cluster environment
+  dns:
+    baseDomain: in.<cluster-name>.<region>-<id>.example.com
+    baseDomainPrefix: ""
+  etcd:
+    managed:
+      storage:
+        persistentVolume:
+          size: 8Gi
+        type: PersistentVolume
+    managementType: Managed
+  fips: false
+  infraID: idp-oidc
+  infrastructureAvailabilityPolicy: SingleReplica
+  issuerURL: https://hypershift-idp-oidc-oidc
+  networking:
+    clusterNetwork:
+    - cidr: 10.132.0.0/14
+    networkType: OVNKubernetes
+    serviceNetwork:
+    - cidr: 172.31.0.0/16
+  olmCatalogPlacement: management
+  platform:
+    gcp:
+      # PUBLIC AND PRIVATE ACCESS
+      endpointAccess: PublicAndPrivate
+      networkConfig:
+        network:
+          name: idp-oidc-network
+        privateServiceConnectSubnet:
+          name: idp-oidc-subnet
+      project: <YOUR-PROJECT-ID>
+      region: us-central1
+      workloadIdentity:
+        poolID: idp-oidc-wi-pool
+        projectNumber: "<YOUR-PROJECT-NUMBER>"
+        providerID: idp-oidc-k8s-provider
+        serviceAccountsEmails:
+          controlPlane: idp-oidc-ctrlplane-op@<YOUR-PROJECT-ID>.iam.gserviceaccount.com
+          nodePool: idp-oidc-nodepool-mgmt@<YOUR-PROJECT-ID>.iam.gserviceaccount.com
+    type: GCP
+  pullSecret:
+    name: pull-secret
+  release:
+    image: quay.io/openshift-release-dev/ocp-release:4.20.0-x86_64
+  serviceAccountSigningKey:
+    name: idp-oidc-signing-key
+  # Route type with hostnames for public access
+  services:
+  - service: APIServer
+    servicePublishingStrategy:
+      route:
+        hostname: api.<cluster-name>.<region>-<id>.example.com
+      type: Route
+  - service: OAuthServer
+    servicePublishingStrategy:
+      route:
+        hostname: oauth.<cluster-name>.<region>-<id>.example.com
+      type: Route
+  - service: Konnectivity
+    servicePublishingStrategy:
+      type: Route
+  - service: Ignition
+    servicePublishingStrategy:
+      type: Route
+  sshKey:
+    name: ""
+

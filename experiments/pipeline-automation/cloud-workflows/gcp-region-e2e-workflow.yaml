@@ -1,0 +1,326 @@
+# gcp-region-e2e-workflow.yaml
+# Cloud Workflows version of the Tekton gcp-region-e2e pipeline
+# This demonstrates the same 7-step workflow: git-clone → init → validate → plan → apply → e2e-tests → destroy
+
+main:
+  params: [input]
+  steps:
+    - init_params:
+        assign:
+          - terraform_dir: ${default(map.get(input, "terraform-dir"), "environments/int/region/us-central1")}
+          - git_url: ${default(map.get(input, "git-url"), "<YOUR-TERRAFORM-REPO-URL>")}
+          - git_revision: ${default(map.get(input, "git-revision"), "main")}
+          - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - region: "us-central1"
+          - execution_id: ${sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID")}
+
+    - log_start:
+        call: sys.log
+        args:
+          text: "Starting E2E pipeline execution"
+          severity: INFO
+
+    - git_clone:
+        call: sys.log
+        args:
+          text: "[1/7] Cloning git repository"
+          severity: INFO
+
+    - git_clone_build:
+        call: googleapis.cloudbuild.v1.projects.builds.create
+        args:
+          projectId: ${project_id}
+          body:
+            steps:
+              - name: gcr.io/cloud-builders/git
+                args:
+                  - clone
+                  - --branch
+                  - ${git_revision}
+                  - --single-branch
+                  - --depth
+                  - "1"
+                  - ${git_url}
+                  - repo
+            artifacts:
+              objects:
+                location: ${"gs://" + project_id + "-terraform-workspace/e2e-" + execution_id}
+                paths:
+                  - repo/**/*
+            timeout: 300s
+        result: git_clone_result
+
+    - wait_git_clone:
+        call: await_build_completion
+        args:
+          project_id: ${project_id}
+          build_id: ${git_clone_result.metadata.build.id}
+        result: git_clone_status
+
+    - terraform_init:
+        call: sys.log
+        args:
+          text: "[2/7] Running terraform init"
+          severity: INFO
+
+    - terraform_init_build:
+        call: googleapis.cloudbuild.v1.projects.builds.create
+        args:
+          projectId: ${project_id}
+          body:
+            steps:
+              - name: hashicorp/terraform:1.9
+                dir: ${terraform_dir}
+                args:
+                  - init
+                  - -backend=false
+            source:
+              storageSource:
+                bucket: ${project_id + "-terraform-workspace"}
+                object: ${"e2e-" + execution_id + "/repo"}
+            timeout: 600s
+        result: init_result
+
+    - wait_terraform_init:
+        call: await_build_completion
+        args:
+          project_id: ${project_id}
+          build_id: ${init_result.metadata.build.id}
+        result: init_status
+
+    - terraform_validate:
+        call: sys.log
+        args:
+          text: "[3/7] Running terraform validate"
+          severity: INFO
+
+    - terraform_validate_build:
+        call: googleapis.cloudbuild.v1.projects.builds.create
+        args:
+          projectId: ${project_id}
+          body:
+            steps:
+              - name: hashicorp/terraform:1.9
+                dir: ${terraform_dir}
+                args:
+                  - validate
+            source:
+              storageSource:
+                bucket: ${project_id + "-terraform-workspace"}
+                object: ${"e2e-" + execution_id + "/repo"}
+            timeout: 300s
+        result: validate_result
+
+    - wait_terraform_validate:
+        call: await_build_completion
+        args:
+          project_id: ${project_id}
+          build_id: ${validate_result.metadata.build.id}
+        result: validate_status
+
+    - terraform_plan:
+        call: sys.log
+        args:
+          text: "[4/7] Running terraform plan"
+          severity: INFO
+
+    - terraform_plan_build:
+        call: googleapis.cloudbuild.v1.projects.builds.create
+        args:
+          projectId: ${project_id}
+          body:
+            steps:
+              - name: hashicorp/terraform:1.9
+                dir: ${terraform_dir}
+                args:
+                  - plan
+                  - -out=tfplan
+            source:
+              storageSource:
+                bucket: ${project_id + "-terraform-workspace"}
+                object: ${"e2e-" + execution_id + "/repo"}
+            artifacts:
+              objects:
+                location: ${"gs://" + project_id + "-terraform-workspace/e2e-" + execution_id}
+                paths:
+                  - tfplan
+            timeout: 600s
+        result: plan_result
+
+    - wait_terraform_plan:
+        call: await_build_completion
+        args:
+          project_id: ${project_id}
+          build_id: ${plan_result.metadata.build.id}
+        result: plan_status
+
+    - terraform_apply:
+        call: sys.log
+        args:
+          text: "[5/7] Running terraform apply"
+          severity: INFO
+
+    - terraform_apply_build:
+        call: googleapis.cloudbuild.v1.projects.builds.create
+        args:
+          projectId: ${project_id}
+          body:
+            steps:
+              - name: hashicorp/terraform:1.9
+                dir: ${terraform_dir}
+                args:
+                  - apply
+                  - -auto-approve
+                  - tfplan
+            source:
+              storageSource:
+                bucket: ${project_id + "-terraform-workspace"}
+                object: ${"e2e-" + execution_id + "/repo"}
+            timeout: 1800s
+        result: apply_result
+
+    - wait_terraform_apply:
+        call: await_build_completion
+        args:
+          project_id: ${project_id}
+          build_id: ${apply_result.metadata.build.id}
+        result: apply_status
+
+    - run_e2e_tests:
+        call: sys.log
+        args:
+          text: "[6/7] Running E2E tests"
+          severity: INFO
+
+    - e2e_tests_build:
+        call: googleapis.cloudbuild.v1.projects.builds.create
+        args:
+          projectId: ${project_id}
+          body:
+            steps:
+              - name: alpine:latest
+                dir: ${terraform_dir}
+                script: |
+                  #!/bin/sh
+                  set -e
+
+                  echo "=== Running E2E Tests (MOCK) ==="
+                  echo ""
+                  echo "Test directory: ${terraform_dir}"
+                  echo ""
+
+                  echo "Running test suite..."
+                  sleep 2
+
+                  echo "✓ Test 1: Verify infrastructure connectivity"
+                  sleep 1
+
+                  echo "✓ Test 2: Check resource availability"
+                  sleep 1
+
+                  echo "✓ Test 3: Validate network configuration"
+                  sleep 1
+
+                  echo "✓ Test 4: Run integration tests"
+                  sleep 1
+
+                  echo ""
+                  echo "=== All E2E Tests Passed ==="
+            source:
+              storageSource:
+                bucket: ${project_id + "-terraform-workspace"}
+                object: ${"e2e-" + execution_id + "/repo"}
+            timeout: 600s
+        result: e2e_result
+
+    - wait_e2e_tests:
+        call: await_build_completion
+        args:
+          project_id: ${project_id}
+          build_id: ${e2e_result.metadata.build.id}
+        result: e2e_status
+
+    - terraform_destroy:
+        call: sys.log
+        args:
+          text: "[7/7] Running terraform destroy (cleanup)"
+          severity: INFO
+
+    - terraform_destroy_build:
+        call: googleapis.cloudbuild.v1.projects.builds.create
+        args:
+          projectId: ${project_id}
+          body:
+            steps:
+              - name: hashicorp/terraform:1.9
+                dir: ${terraform_dir}
+                args:
+                  - destroy
+                  - -auto-approve
+            source:
+              storageSource:
+                bucket: ${project_id + "-terraform-workspace"}
+                object: ${"e2e-" + execution_id + "/repo"}
+            timeout: 1800s
+        result: destroy_result
+
+    - wait_terraform_destroy:
+        call: await_build_completion
+        args:
+          project_id: ${project_id}
+          build_id: ${destroy_result.metadata.build.id}
+        result: destroy_status
+
+    - workflow_complete:
+        call: sys.log
+        args:
+          text: "E2E Pipeline completed successfully"
+          severity: INFO
+
+    - return_results:
+        return:
+          status: SUCCESS
+          steps_completed: 7
+          git_clone_build_id: ${git_clone_result.metadata.build.id}
+          terraform_init_build_id: ${init_result.metadata.build.id}
+          terraform_validate_build_id: ${validate_result.metadata.build.id}
+          terraform_plan_build_id: ${plan_result.metadata.build.id}
+          terraform_apply_build_id: ${apply_result.metadata.build.id}
+          e2e_tests_build_id: ${e2e_result.metadata.build.id}
+          terraform_destroy_build_id: ${destroy_result.metadata.build.id}
+
+await_build_completion:
+  params: [project_id, build_id]
+  steps:
+    - get_build:
+        call: googleapis.cloudbuild.v1.projects.builds.get
+        args:
+          projectId: ${project_id}
+          id: ${build_id}
+        result: build
+
+    - check_status:
+        switch:
+          - condition: ${build.status == "SUCCESS"}
+            return: SUCCESS
+          - condition: ${build.status == "FAILURE"}
+            raise: "Build failed"
+          - condition: ${build.status == "TIMEOUT"}
+            raise: "Build timed out"
+          - condition: ${build.status == "CANCELLED"}
+            raise: "Build was cancelled"
+
+    - wait:
+        call: sys.sleep
+        args:
+          seconds: 10
+
+    - retry:
+        call: await_build_completion
+        args:
+          project_id: ${project_id}
+          build_id: ${build_id}
+        result: final_status
+
+    - return_status:
+        return: ${final_status}

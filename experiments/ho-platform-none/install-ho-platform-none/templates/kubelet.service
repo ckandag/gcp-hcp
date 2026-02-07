@@ -1,0 +1,21 @@
+[Unit]
+Description=kubelet: The Kubernetes Node Agent
+Documentation=https://kubernetes.io/docs/
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/kubelet \
+  --kubeconfig=/var/lib/kubelet/kubeconfig \
+  --config=/var/lib/kubelet/config.yaml \
+  --container-runtime-endpoint=unix:///var/run/crio/crio.sock \
+  --pod-infra-container-image=registry.redhat.io/ubi8/pause:latest \
+  --node-ip=${worker_ip} \
+  --hostname-override=${worker_node_name} \
+  --v=2
+Restart=always
+StartLimitInterval=0
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

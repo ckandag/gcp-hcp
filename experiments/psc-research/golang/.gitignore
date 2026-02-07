@@ -1,0 +1,27 @@
+# Compiled binaries
+bin/
+*.exe
+*.exe~
+
+# Go build cache
+.cache/
+
+# Test outputs
+*.test
+*.out
+
+# Local environment files
+.env
+.env.local
+
+# IDE files
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.temp
+
+# OS files
+.DS_Store
+Thumbs.db

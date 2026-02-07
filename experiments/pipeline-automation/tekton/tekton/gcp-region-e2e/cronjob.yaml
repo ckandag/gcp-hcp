@@ -1,0 +1,64 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gcp-region-e2e-nightly
+  namespace: default
+spec:
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: tekton-gcp-deployer
+          containers:
+          - name: trigger-pipeline
+            image: gcr.io/tekton-releases/github.com/tektoncd/pipeline/cmd/tkn:latest
+            command:
+            - /bin/sh
+            - -c
+            - |
+              #!/bin/sh
+              set -e
+
+              echo "=== Triggering Nightly E2E Pipeline ==="
+              echo "Timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+              echo ""
+
+              # Create PipelineRun
+              cat <<EOF | kubectl apply -f -
+              apiVersion: tekton.dev/v1beta1
+              kind: PipelineRun
+              metadata:
+                generateName: gcp-region-e2e-nightly-
+                namespace: default
+                labels:
+                  trigger: cronjob
+                  schedule: nightly
+              spec:
+                serviceAccountName: tekton-gcp-deployer
+                pipelineRef:
+                  name: gcp-region-e2e-pipeline
+                workspaces:
+                  - name: shared-data
+                    volumeClaimTemplate:
+                      spec:
+                        accessModes:
+                          - ReadWriteOnce
+                        resources:
+                          requests:
+                            storage: 1Gi
+                params:
+                  - name: terraform-dir
+                    value: "environments/int/region/us-central1"
+                  - name: git-url
+                    value: "https://github.com/jimdaga/hcp-gcp-terraform-example-1"
+                  - name: git-revision
+                    value: "main"
+              EOF
+
+              echo ""
+              echo "✓ Pipeline triggered successfully"
+          restartPolicy: Never

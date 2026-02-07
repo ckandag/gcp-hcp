@@ -1,0 +1,27 @@
+apiVersion: tekton.dev/v1beta1
+kind: PipelineRun
+metadata:
+  generateName: gcp-region-e2e-manual-
+  namespace: default
+  labels:
+    trigger: manual
+spec:
+  serviceAccountName: tekton-gcp-deployer
+  pipelineRef:
+    name: gcp-region-e2e-pipeline
+  workspaces:
+    - name: shared-data
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi
+  params:
+    - name: terraform-dir
+      value: "environments/int/region/us-central1"
+    - name: git-url
+      value: "https://github.com/jimdaga/hcp-gcp-terraform-example-1"
+    - name: git-revision
+      value: "main"

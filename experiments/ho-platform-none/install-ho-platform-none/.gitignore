@@ -1,0 +1,36 @@
+# Sensitive files with credentials and personal configuration
+pull-secret.txt
+my-cluster.env
+*.env
+
+# Installation state and temporary files
+.hypershift_install_state_*.json
+work_*/
+logs/
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Temporary files
+*.tmp
+*.temp
+*~
+
+# Kubernetes config files
+kubeconfig-*
+/tmp/kubeconfig-*
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db

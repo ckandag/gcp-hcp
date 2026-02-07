@@ -1,0 +1,29 @@
+---
+# PersistentVolume using hostPath for KIND
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: tekton-workspace-pv
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  hostPath:
+    path: /tmp/tekton-workspace
+    type: DirectoryOrCreate
+---
+# PersistentVolumeClaim
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tekton-workspace-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: manual
+  resources:
+    requests:
+      storage: 1Gi

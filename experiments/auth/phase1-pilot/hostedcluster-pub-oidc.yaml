@@ -1,0 +1,114 @@
+# HostedCluster with Google OIDC + Public Access
+# Name: pub-oidc
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: clusters-pub-oidc
+---
+apiVersion: hypershift.openshift.io/v1beta1
+kind: HostedCluster
+metadata:
+  annotations:
+    hypershift.openshift.io/pod-security-admission-label-override: baseline
+    hypershift.openshift.io/skip-kas-conflict-san-validation: "true"
+  name: pub-oidc
+  namespace: clusters-pub-oidc
+spec:
+  autoscaling:
+    scaling: ScaleUpAndScaleDown
+  capabilities:
+    disabled:
+    - ImageRegistry
+  configuration:
+    apiServer:
+      audit:
+        profile: Default
+      clientCA:
+        name: ""
+      encryption: {}
+    # Google OIDC Authentication
+    authentication:
+      type: OIDC
+      oidcProviders:
+        - name: google
+          issuer:
+            issuerURL: https://accounts.google.com
+            audiences:
+              - "32555940559.apps.googleusercontent.com"
+          claimMappings:
+            username:
+              claim: email
+            groups:
+              # Google Workspace domain → Kubernetes group
+              claim: hd
+              prefix: ""
+  controllerAvailabilityPolicy: SingleReplica
+  # DNS domain - adjust based on your management cluster environment
+  dns:
+    baseDomain: in.<cluster-name>.<region>-<id>.example.com
+    baseDomainPrefix: ""
+  etcd:
+    managed:
+      storage:
+        persistentVolume:
+          size: 8Gi
+        type: PersistentVolume
+    managementType: Managed
+  fips: false
+  infraID: pub-oidc
+  infrastructureAvailabilityPolicy: SingleReplica
+  issuerURL: https://hypershift-pub-oidc-oidc
+  networking:
+    clusterNetwork:
+    - cidr: 10.132.0.0/14
+    networkType: OVNKubernetes
+    serviceNetwork:
+    - cidr: 172.31.0.0/16
+  olmCatalogPlacement: management
+  platform:
+    gcp:
+      # PUBLIC AND PRIVATE ACCESS
+      endpointAccess: PublicAndPrivate
+      networkConfig:
+        network:
+          name: pub-oidc-network
+        privateServiceConnectSubnet:
+          name: pub-oidc-subnet
+      project: <YOUR-PROJECT-ID>
+      region: us-central1
+      workloadIdentity:
+        poolID: pub-oidc-wi-pool
+        projectNumber: "<YOUR-PROJECT-NUMBER>"
+        providerID: pub-oidc-k8s-provider
+        serviceAccountsEmails:
+          controlPlane: pub-oidc-ctrlplane-op@<YOUR-PROJECT-ID>.iam.gserviceaccount.com
+          nodePool: pub-oidc-nodepool-mgmt@<YOUR-PROJECT-ID>.iam.gserviceaccount.com
+    type: GCP
+  pullSecret:
+    name: pull-secret
+  release:
+    image: quay.io/openshift-release-dev/ocp-release:4.20.0-x86_64
+  serviceAccountSigningKey:
+    name: pub-oidc-signing-key
+  # Route type with hostnames for public access
+  services:
+  - service: APIServer
+    servicePublishingStrategy:
+      route:
+        hostname: api.<cluster-name>.<region>-<id>.example.com
+      type: Route
+  - service: OAuthServer
+    servicePublishingStrategy:
+      route:
+        hostname: oauth.<cluster-name>.<region>-<id>.example.com
+      type: Route
+  - service: Konnectivity
+    servicePublishingStrategy:
+      type: Route
+  - service: Ignition
+    servicePublishingStrategy:
+      type: Route
+  sshKey:
+    name: ""
+

@@ -1,0 +1,47 @@
+apiVersion: hypershift.openshift.io/v1beta1
+kind: NodePool
+metadata:
+  name: ${hosted_cluster_name}-workers
+  namespace: clusters
+  labels:
+    hypershift.openshift.io/cluster: ${hosted_cluster_name}
+spec:
+  # Architecture - using amd64 for GCP
+  arch: amd64
+
+  # Reference to the HostedCluster this NodePool belongs to
+  clusterName: ${hosted_cluster_name}
+
+  # Number of worker nodes to maintain
+  replicas: ${worker_replicas}
+
+  # Release image (should match the HostedCluster)
+  release:
+    image: ${release_image}
+
+  # Platform configuration - None for GCP deployments
+  # This tells HyperShift that we're managing the infrastructure manually
+  platform:
+    type: None
+
+  # Management configuration for node lifecycle
+  management:
+    # Use InPlace upgrades since we're managing the infrastructure manually
+    upgradeType: InPlace
+    # Enable auto-repair to automatically handle unhealthy nodes
+    autoRepair: true
+    # InPlace upgrade configuration
+    inPlace:
+      # Allow up to 1 node to be unavailable during upgrades
+      maxUnavailable: 1
+
+  # Node drain timeout - how long to wait when draining nodes during upgrades
+  nodeDrainTimeout: 300s
+
+  # Volume detach timeout - how long to wait for volumes to detach
+  nodeVolumeDetachTimeout: 300s
+
+  # Node labels to apply to all nodes in this pool
+  nodeLabels:
+    node-role.kubernetes.io/worker: ""
+    hypershift.openshift.io/nodepool: ${hosted_cluster_name}-workers

@@ -1,0 +1,39 @@
+# Environment files
+.env.local
+.env
+
+# Credentials
+credentials.json
+*.pem
+*.key
+
+# Binaries
+wif-example
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output
+*.out
+
+# Go workspace
+go.work
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Kubernetes
+kubeconfig*.yaml
+*-kubeconfig.yaml

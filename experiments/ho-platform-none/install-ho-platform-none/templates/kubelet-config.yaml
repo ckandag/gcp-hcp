@@ -1,0 +1,15 @@
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+authentication:
+  webhook:
+    enabled: true
+  anonymous:
+    enabled: false
+authorization:
+  mode: Webhook
+cgroupDriver: systemd
+clusterDNS:
+- 172.31.0.10
+clusterDomain: cluster.local
+rotateCertificates: true
+staticPodPath: /etc/kubernetes/manifests

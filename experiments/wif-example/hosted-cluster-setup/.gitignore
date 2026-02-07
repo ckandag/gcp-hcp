@@ -1,0 +1,11 @@
+# Private keys - NEVER commit these!
+*.pem
+sa-signing-key*
+
+# Generated secrets
+*-secret.yaml
+
+# Optional: Allow committing JWKS (public keys only)
+# Uncomment the next line if you want to keep JWKS private
+# *.json
+

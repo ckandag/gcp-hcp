@@ -1,0 +1,162 @@
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: gcp-region-e2e-pipeline
+spec:
+  workspaces:
+    - name: shared-data
+      description: "Workspace for git repo and Terraform state"
+
+  params:
+    - name: terraform-dir
+      type: string
+      description: "Directory containing Terraform configs to test"
+      default: "environments/int/region/us-central1"
+    - name: git-url
+      type: string
+      description: "Git repository URL"
+      default: "<YOUR-TERRAFORM-REPO-URL>"
+    - name: git-revision
+      type: string
+      description: "Git revision (branch, tag, or commit SHA)"
+      default: "main"
+
+  tasks:
+    - name: git-clone
+      taskRef:
+        name: git-clone
+      workspaces:
+        - name: output
+          workspace: shared-data
+      params:
+        - name: url
+          value: $(params.git-url)
+        - name: revision
+          value: $(params.git-revision)
+        - name: deleteExisting
+          value: "true"
+
+    - name: terraform-init
+      runAfter:
+        - git-clone
+      taskRef:
+        name: terraform-gcp
+      workspaces:
+        - name: source
+          workspace: shared-data
+      params:
+        - name: terraform-dir
+          value: $(params.terraform-dir)
+        - name: command
+          value: "init"
+        - name: args
+          value: "-backend=false"
+
+    - name: terraform-validate
+      runAfter:
+        - terraform-init
+      taskRef:
+        name: terraform-gcp
+      workspaces:
+        - name: source
+          workspace: shared-data
+      params:
+        - name: terraform-dir
+          value: $(params.terraform-dir)
+        - name: command
+          value: "validate"
+        - name: args
+          value: ""
+
+    - name: terraform-plan
+      runAfter:
+        - terraform-validate
+      taskRef:
+        name: terraform-gcp
+      workspaces:
+        - name: source
+          workspace: shared-data
+      params:
+        - name: terraform-dir
+          value: $(params.terraform-dir)
+        - name: command
+          value: "plan"
+        - name: args
+          value: "-out=tfplan"
+
+    - name: terraform-apply
+      runAfter:
+        - terraform-plan
+      taskRef:
+        name: terraform-gcp
+      workspaces:
+        - name: source
+          workspace: shared-data
+      params:
+        - name: terraform-dir
+          value: $(params.terraform-dir)
+        - name: command
+          value: "apply"
+        - name: args
+          value: "-auto-approve tfplan"
+
+    - name: run-e2e-tests
+      runAfter:
+        - terraform-apply
+      workspaces:
+        - name: source
+          workspace: shared-data
+      taskSpec:
+        workspaces:
+          - name: source
+        params:
+          - name: terraform-dir
+        steps:
+          - name: mock-e2e-tests
+            image: alpine:latest
+            workingDir: $(workspaces.source.path)/$(params.terraform-dir)
+            script: |
+              #!/bin/sh
+              set -e
+
+              echo "=== Running E2E Tests (MOCK) ==="
+              echo ""
+              echo "Test directory: $(workspaces.source.path)/$(params.terraform-dir)"
+              echo ""
+
+              echo "Running test suite..."
+              sleep 2
+
+              echo "✓ Test 1: Verify infrastructure connectivity"
+              sleep 1
+
+              echo "✓ Test 2: Check resource availability"
+              sleep 1
+
+              echo "✓ Test 3: Validate network configuration"
+              sleep 1
+
+              echo "✓ Test 4: Run integration tests"
+              sleep 1
+
+              echo ""
+              echo "=== All E2E Tests Passed ==="
+      params:
+        - name: terraform-dir
+          value: $(params.terraform-dir)
+
+    - name: terraform-destroy
+      runAfter:
+        - run-e2e-tests
+      taskRef:
+        name: terraform-gcp
+      workspaces:
+        - name: source
+          workspace: shared-data
+      params:
+        - name: terraform-dir
+          value: $(params.terraform-dir)
+        - name: command
+          value: "destroy"
+        - name: args
+          value: "-auto-approve"

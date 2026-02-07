@@ -1,0 +1,12 @@
+apiVersion: triggers.tekton.dev/v1beta1
+kind: EventListener
+metadata:
+  name: gcp-region-provisioning-listener
+spec:
+  serviceAccountName: tekton-triggers-sa
+  triggers:
+    - name: gcp-region-provision-trigger
+      bindings:
+        - ref: gcp-region-binding
+      template:
+        ref: gcp-region-template

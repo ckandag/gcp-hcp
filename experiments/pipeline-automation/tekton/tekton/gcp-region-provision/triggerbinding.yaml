@@ -1,0 +1,15 @@
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerBinding
+metadata:
+  name: gcp-region-binding
+spec:
+  params:
+    # Extract environment from webhook payload
+    - name: environment
+      value: $(body.environment)
+    # Extract region from webhook payload
+    - name: region
+      value: $(body.region)
+    # Extract sector from webhook payload
+    - name: sector
+      value: $(body.sector)

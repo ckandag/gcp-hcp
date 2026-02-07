@@ -1,0 +1,456 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hypershift-autopilot-webhook
+  namespace: hypershift-webhooks
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hypershift-autopilot-webhook
+rules:
+- apiGroups: [""]
+  resources: ["pods", "namespaces"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "statefulsets"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hypershift-autopilot-webhook
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hypershift-autopilot-webhook
+subjects:
+- kind: ServiceAccount
+  name: hypershift-autopilot-webhook
+  namespace: hypershift-webhooks
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hypershift-autopilot-webhook
+  namespace: hypershift-webhooks
+spec:
+  selector:
+    app: hypershift-autopilot-webhook
+  ports:
+  - port: 443
+    targetPort: 8443
+    protocol: TCP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: webhook-binary
+  namespace: hypershift-webhooks
+data:
+  main.go: |
+    package main
+    
+    import (
+    	"crypto/tls"
+    	"encoding/json"
+    	"io"
+    	"log"
+    	"net/http"
+    	"strings"
+    
+    	admissionv1 "k8s.io/api/admission/v1"
+    	appsv1 "k8s.io/api/apps/v1"
+    	corev1 "k8s.io/api/core/v1"
+    	"k8s.io/apimachinery/pkg/api/resource"
+    	"k8s.io/apimachinery/pkg/runtime"
+    	"k8s.io/apimachinery/pkg/runtime/serializer"
+    )
+    
+    var (
+    	scheme = runtime.NewScheme()
+    	codecs = serializer.NewCodecFactory(scheme)
+    )
+    
+    type WebhookServer struct {
+    	server *http.Server
+    }
+    
+    type patchOperation struct {
+    	Op    string      `json:"op"`
+    	Path  string      `json:"path"`
+    	Value interface{} `json:"value,omitempty"`
+    }
+    
+    func main() {
+    	certPath := "/etc/certs/tls.crt"
+    	keyPath := "/etc/certs/tls.key"
+    
+    	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+    	if err != nil {
+    		log.Fatalf("Failed to load key pair: %v", err)
+    	}
+    
+    	server := &WebhookServer{
+    		server: &http.Server{
+    			Addr:      ":8443",
+    			TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}},
+    		},
+    	}
+    
+    	mux := http.NewServeMux()
+    	mux.HandleFunc("/mutate", server.mutate)
+    	mux.HandleFunc("/health", server.health)
+    	server.server.Handler = mux
+    
+    	log.Println("Starting HyperShift GKE Autopilot webhook server on :8443")
+    	if err := server.server.ListenAndServeTLS("", ""); err != nil {
+    		log.Fatalf("Failed to start webhook server: %v", err)
+    	}
+    }
+    
+    func (ws *WebhookServer) health(w http.ResponseWriter, r *http.Request) {
+    	w.WriteHeader(http.StatusOK)
+    	w.Write([]byte("OK"))
+    }
+    
+    func (ws *WebhookServer) mutate(w http.ResponseWriter, r *http.Request) {
+    	var body []byte
+    	if r.Body != nil {
+    		if data, err := io.ReadAll(r.Body); err == nil {
+    			body = data
+    		}
+    	}
+    
+    	if len(body) == 0 {
+    		log.Println("Empty request body")
+    		http.Error(w, "Empty request body", http.StatusBadRequest)
+    		return
+    	}
+    
+    	var admissionReview admissionv1.AdmissionReview
+    	if err := json.Unmarshal(body, &admissionReview); err != nil {
+    		log.Printf("Could not decode admission review: %v", err)
+    		http.Error(w, err.Error(), http.StatusBadRequest)
+    		return
+    	}
+    
+    	req := admissionReview.Request
+    	var patches []patchOperation
+    
+    	// Check if this is a HyperShift control plane namespace
+    	namespace := req.Namespace
+    	if !isHyperShiftControlPlane(namespace) {
+    		log.Printf("Skipping non-HyperShift namespace: %s", namespace)
+    		ws.sendResponse(w, &admissionReview, patches)
+    		return
+    	}
+    
+    	log.Printf("Processing %s %s in namespace %s", req.Kind.Kind, req.Name, namespace)
+    
+    	switch req.Kind.Kind {
+    	case "Deployment":
+    		patches = ws.mutateDeployment(req, patches)
+    	case "StatefulSet":
+    		patches = ws.mutateStatefulSet(req, patches)
+    	case "Pod":
+    		patches = ws.mutatePod(req, patches)
+    	}
+    
+    	log.Printf("Applied %d patches to %s %s", len(patches), req.Kind.Kind, req.Name)
+    	ws.sendResponse(w, &admissionReview, patches)
+    }
+    
+    func (ws *WebhookServer) mutateDeployment(req *admissionv1.AdmissionRequest, patches []patchOperation) []patchOperation {
+    	var deployment appsv1.Deployment
+    	if err := json.Unmarshal(req.Object.Raw, &deployment); err != nil {
+    		log.Printf("Could not unmarshal deployment: %v", err)
+    		return patches
+    	}
+    
+    	// Fix cluster-api deployment
+    	if deployment.Name == "cluster-api" {
+    		log.Println("Applying cluster-api fixes for GKE Autopilot")
+    		patches = append(patches, ws.fixClusterAPISecurityContext()...)
+    	}
+    
+    	// Fix control-plane-operator deployment
+    	if deployment.Name == "control-plane-operator" {
+    		log.Println("Applying control-plane-operator fixes for GKE Autopilot")
+    		patches = append(patches, ws.fixControlPlaneOperatorSecurityContext()...)
+    	}
+    
+    	return patches
+    }
+    
+    func (ws *WebhookServer) mutateStatefulSet(req *admissionv1.AdmissionRequest, patches []patchOperation) []patchOperation {
+    	var statefulSet appsv1.StatefulSet
+    	if err := json.Unmarshal(req.Object.Raw, &statefulSet); err != nil {
+    		log.Printf("Could not unmarshal statefulset: %v", err)
+    		return patches
+    	}
+    
+    	// Fix etcd StatefulSet
+    	if statefulSet.Name == "etcd" {
+    		log.Println("Applying etcd fixes for GKE Autopilot")
+    		patches = append(patches, ws.fixEtcdResources()...)
+    	}
+    
+    	return patches
+    }
+    
+    func (ws *WebhookServer) mutatePod(req *admissionv1.AdmissionRequest, patches []patchOperation) []patchOperation {
+    	var pod corev1.Pod
+    	if err := json.Unmarshal(req.Object.Raw, &pod); err != nil {
+    		log.Printf("Could not unmarshal pod: %v", err)
+    		return patches
+    	}
+    
+    	// Apply general security context fixes for all HyperShift pods
+    	if hasHyperShiftLabels(pod.Labels) {
+    		log.Printf("Applying general security context fixes for pod %s", pod.Name)
+    		patches = append(patches, ws.fixPodSecurityContext()...)
+    	}
+    
+    	return patches
+    }
+    
+    func (ws *WebhookServer) fixClusterAPISecurityContext() []patchOperation {
+    	return []patchOperation{
+    		{
+    			Op:   "add",
+    			Path: "/spec/template/spec/securityContext",
+    			Value: map[string]interface{}{
+    				"runAsNonRoot": true,
+    				"runAsUser":    1001,
+    				"seccompProfile": map[string]interface{}{
+    					"type": "RuntimeDefault",
+    				},
+    			},
+    		},
+    		{
+    			Op:   "replace",
+    			Path: "/spec/template/spec/containers/0/securityContext",
+    			Value: map[string]interface{}{
+    				"allowPrivilegeEscalation": false,
+    				"capabilities": map[string]interface{}{
+    					"drop": []string{"ALL"},
+    				},
+    				"readOnlyRootFilesystem": true,
+    				"runAsNonRoot":           true,
+    				"runAsUser":              1001,
+    				"seccompProfile": map[string]interface{}{
+    					"type": "RuntimeDefault",
+    				},
+    			},
+    		},
+    	}
+    }
+    
+    func (ws *WebhookServer) fixControlPlaneOperatorSecurityContext() []patchOperation {
+    	return []patchOperation{
+    		{
+    			Op:   "add",
+    			Path: "/spec/template/spec/securityContext",
+    			Value: map[string]interface{}{
+    				"runAsNonRoot": true,
+    				"runAsUser":    1001,
+    				"seccompProfile": map[string]interface{}{
+    					"type": "RuntimeDefault",
+    				},
+    			},
+    		},
+    	}
+    }
+    
+    func (ws *WebhookServer) fixEtcdResources() []patchOperation {
+    	minCPU := resource.MustParse("500m") // GKE Autopilot minimum for pod anti-affinity
+    
+    	return []patchOperation{
+    		// Fix ensure-dns init container CPU
+    		{
+    			Op:   "replace",
+    			Path: "/spec/template/spec/initContainers/0/resources/requests/cpu",
+    			Value: minCPU.String(),
+    		},
+    		// Fix reset-member init container CPU  
+    		{
+    			Op:   "replace",
+    			Path: "/spec/template/spec/initContainers/1/resources/requests/cpu",
+    			Value: minCPU.String(),
+    		},
+    		// Fix etcd container CPU
+    		{
+    			Op:   "replace",
+    			Path: "/spec/template/spec/containers/0/resources/requests/cpu",
+    			Value: minCPU.String(),
+    		},
+    	}
+    }
+    
+    func (ws *WebhookServer) fixPodSecurityContext() []patchOperation {
+    	return []patchOperation{
+    		{
+    			Op:   "add",
+    			Path: "/spec/securityContext",
+    			Value: map[string]interface{}{
+    				"runAsNonRoot": true,
+    				"runAsUser":    1001,
+    				"seccompProfile": map[string]interface{}{
+    					"type": "RuntimeDefault",
+    				},
+    			},
+    		},
+    	}
+    }
+    
+    func (ws *WebhookServer) sendResponse(w http.ResponseWriter, admissionReview *admissionv1.AdmissionReview, patches []patchOperation) {
+    	var patchBytes []byte
+    	var err error
+    
+    	if len(patches) > 0 {
+    		patchBytes, err = json.Marshal(patches)
+    		if err != nil {
+    			log.Printf("Could not marshal patches: %v", err)
+    			http.Error(w, err.Error(), http.StatusInternalServerError)
+    			return
+    		}
+    	}
+    
+    	admissionResponse := &admissionv1.AdmissionResponse{
+    		UID:     admissionReview.Request.UID,
+    		Allowed: true,
+    	}
+    
+    	if len(patchBytes) > 0 {
+    		patchType := admissionv1.PatchTypeJSONPatch
+    		admissionResponse.PatchType = &patchType
+    		admissionResponse.Patch = patchBytes
+    	}
+    
+    	admissionReview.Response = admissionResponse
+    	respBytes, err := json.Marshal(admissionReview)
+    	if err != nil {
+    		log.Printf("Could not marshal response: %v", err)
+    		http.Error(w, err.Error(), http.StatusInternalServerError)
+    		return
+    	}
+    
+    	w.Header().Set("Content-Type", "application/json")
+    	w.Write(respBytes)
+    }
+    
+    func isHyperShiftControlPlane(namespace string) bool {
+    	// Check if this is a HyperShift control plane namespace
+    	return strings.HasPrefix(namespace, "clusters-") || namespace == "hypershift"
+    }
+    
+    func hasHyperShiftLabels(labels map[string]string) bool {
+    	if labels == nil {
+    		return false
+    	}
+    	
+    	for key := range labels {
+    		if strings.Contains(key, "hypershift.openshift.io") {
+    			return true
+    		}
+    	}
+    	return false
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hypershift-autopilot-webhook
+  namespace: hypershift-webhooks
+  labels:
+    app: hypershift-autopilot-webhook
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hypershift-autopilot-webhook
+  template:
+    metadata:
+      labels:
+        app: hypershift-autopilot-webhook
+    spec:
+      serviceAccountName: hypershift-autopilot-webhook
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: webhook
+        image: golang:1.21-alpine
+        command: ["/bin/sh"]
+        args:
+        - -c
+        - |
+          apk add --no-cache git
+          cd /tmp
+          cp /app/main.go .
+          echo 'module webhook' > go.mod
+          echo 'go 1.21' >> go.mod
+          echo '' >> go.mod
+          echo 'require (' >> go.mod
+          echo '    k8s.io/api v0.28.2' >> go.mod
+          echo '    k8s.io/apimachinery v0.28.2' >> go.mod
+          echo ')' >> go.mod
+          go mod tidy
+          go run main.go
+        ports:
+        - containerPort: 8443
+          name: https
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: false
+          runAsNonRoot: true
+          runAsUser: 1001
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+            ephemeral-storage: 1Gi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+            ephemeral-storage: 1Gi
+        volumeMounts:
+        - name: certs
+          mountPath: /etc/certs
+          readOnly: true
+        - name: app
+          mountPath: /app
+          readOnly: true
+        env:
+        - name: LOG_LEVEL
+          value: "info"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8443
+            scheme: HTTPS
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8443
+            scheme: HTTPS
+          initialDelaySeconds: 25
+          periodSeconds: 5
+      volumes:
+      - name: certs
+        secret:
+          secretName: hypershift-autopilot-webhook-certs
+      - name: app
+        configMap:
+          name: webhook-binary
