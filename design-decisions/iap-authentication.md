@@ -240,18 +240,22 @@ OAuth client secrets require periodic rotation for security best practices:
 
 ### JWT Authentication
 
-**Validation Strategy**: Issuer-only validation
+**Validation Strategy**: Issuer and audience validation
 
 Applications validate JWT tokens from IAP using:
 - Header: `X-Goog-IAP-JWT-Assertion`
-- Issuer claim: `https://cloud.google.com/iap`
+- Issuer (`iss`) claim: `https://cloud.google.com/iap`
+- Audience (`aud`) claim: must exactly match the protected resource identifier:
+  - App Engine: `/projects/PROJECT_NUMBER/apps/PROJECT_ID`
+  - Compute Engine / GKE: `/projects/PROJECT_NUMBER/global/backendServices/SERVICE_ID`
 - JWKS URL: `https://www.gstatic.com/iap/verify/public_key-jwk`
 
 **Security Layers**:
-1. JWT signature validation using Google's public keys
-2. Issuer claim verification
-3. Token expiration validation
-4. IAM policy enforcement (who can access)
+1. JWT signature validation against Google's public keys (JWKS URL above)
+2. Issuer (`iss`) claim verification against `https://cloud.google.com/iap`
+3. Audience (`aud`) claim verification against the exact resource identifier for the protected backend
+4. Token expiration (`exp`) validation
+5. IAM policy enforcement (who can access)
 
 ### Access Control
 
