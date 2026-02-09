@@ -1,0 +1,335 @@
+# Example GMP PodMonitoring Deployment
+#
+# This file demonstrates the resources needed to use Google Managed Prometheus
+# with PodMonitoring CRDs for HyperShift HCP monitoring.
+#
+# Required steps:
+# 1. Apply the ClusterRole and ClusterRoleBinding (one-time, cluster-wide)
+# 2. Convert all ServiceMonitors to PodMonitoring CRDs
+# 3. Convert all PrometheusRules to Rules CRDs
+# 4. Update NetworkPolicy templates in hypershift repository
+
+---
+# ClusterRole: Grant secret access to GMP collectors
+# This is required because HCP metrics endpoints use TLS certificates
+# stored in secrets within each HCP namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gmp-collector-secret-access
+  labels:
+    app.kubernetes.io/name: gmp-collector-secret-access
+    app.kubernetes.io/managed-by: hcp-monitoring
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch"]
+
+---
+# ClusterRoleBinding: Bind the ClusterRole to GMP collector service account
+# This grants the GMP collector in gke-gmp-system namespace the ability to
+# read secrets from all namespaces, including HCP namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gmp-collector-secret-access
+  labels:
+    app.kubernetes.io/name: gmp-collector-secret-access
+    app.kubernetes.io/managed-by: hcp-monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gmp-collector-secret-access
+subjects:
+- kind: ServiceAccount
+  name: collector
+  namespace: gke-gmp-system
+
+---
+# Example: PodMonitoring for kube-apiserver
+#
+# This is a conversion of the ServiceMonitor for kube-apiserver to PodMonitoring format.
+# You would need to create similar conversions for all 42 ServiceMonitors/PodMonitors.
+#
+# Original ServiceMonitor characteristics:
+# - Uses TLS with client certificates
+# - Scrapes metrics from kube-apiserver pods
+# - Requires access to secrets in the HCP namespace
+#
+# Deploy one per HCP namespace.
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: kube-apiserver
+  namespace: clusters-CLUSTER-ID-NAMESPACE  # Replace with actual HCP namespace
+  labels:
+    app.kubernetes.io/name: kube-apiserver
+    app.kubernetes.io/component: monitoring
+spec:
+  # Selector to match kube-apiserver pods
+  selector:
+    matchLabels:
+      app: kube-apiserver
+
+  # Endpoints configuration
+  endpoints:
+  - port: https
+    interval: 30s
+    scheme: https
+
+    # TLS configuration for mutual TLS authentication
+    # Note: PodMonitoring uses 'tls' instead of 'tlsConfig'
+    tls:
+      # CA certificate from secret (not configMap like ServiceMonitor)
+      ca:
+        secret:
+          name: root-ca
+          key: ca.crt
+
+      # Client certificate for authentication
+      cert:
+        secret:
+          name: metrics-client
+          key: tls.crt
+
+      # Client key for authentication
+      key:
+        secret:
+          name: metrics-client
+          key: tls.key
+
+      # Server name for TLS verification
+      serverName: kube-apiserver
+
+    # IMPORTANT: Cost Optimization via Metric Relabeling
+    # GMP charges by samples ingested. HCP metrics can be very high-cardinality.
+    # Use metricRelabeling to drop expensive metrics BEFORE they reach GCM.
+    #
+    # WARNING: Without Prometheus UI, it's harder to know what you're dropping.
+    # Consider testing filters in a cluster-wide Prometheus first.
+    metricRelabeling:
+    # Example 1: Drop high-cardinality histogram buckets
+    - sourceLabels: [__name__]
+      regex: 'apiserver_request_duration_seconds_bucket'
+      action: drop
+
+    # Example 2: Keep only specific metrics you need
+    # - sourceLabels: [__name__]
+    #   regex: 'apiserver_request_total|apiserver_current_inflight_requests|up'
+    #   action: keep
+
+    # Example 3: Drop all histogram buckets (keep summaries/counters)
+    # - sourceLabels: [__name__]
+    #   regex: '.*_bucket'
+    #   action: drop
+
+---
+# Example: PodMonitoring for etcd
+#
+# Another example showing a different component.
+# Deploy one per HCP namespace.
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: etcd
+  namespace: clusters-CLUSTER-ID-NAMESPACE  # Replace with actual HCP namespace
+  labels:
+    app.kubernetes.io/name: etcd
+    app.kubernetes.io/component: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: etcd
+
+  endpoints:
+  - port: metrics
+    interval: 30s
+    scheme: https
+
+    tls:
+      ca:
+        secret:
+          name: etcd-client
+          key: ca.crt
+      cert:
+        secret:
+          name: etcd-client
+          key: tls.crt
+      key:
+        secret:
+          name: etcd-client
+          key: tls.key
+      serverName: etcd
+
+---
+# Example: Rules CRD for recording rules
+#
+# This is a conversion of PrometheusRule to Rules CRD format.
+# You would need to convert all PrometheusRules to this format.
+#
+# Note: Rules CRD syntax differs from PrometheusRule.
+# Consult GMP documentation for exact conversion.
+apiVersion: monitoring.googleapis.com/v1
+kind: Rules
+metadata:
+  name: hcp-recording-rules
+  namespace: clusters-CLUSTER-ID-NAMESPACE  # Replace with actual HCP namespace
+  labels:
+    app.kubernetes.io/name: hcp-recording-rules
+    app.kubernetes.io/component: monitoring
+spec:
+  # Recording rules groups
+  groups:
+  - name: apiserver_rules
+    interval: 30s
+    rules:
+    # Example recording rule
+    - record: apiserver:apiserver_request_duration_seconds:histogram_quantile
+      expr: |
+        histogram_quantile(0.99,
+          sum(rate(apiserver_request_duration_seconds_bucket{job="apiserver"}[5m])) by (le, verb)
+        )
+      labels:
+        quantile: "0.99"
+
+    # Example aggregation rule
+    - record: apiserver:apiserver_request_total:rate5m
+      expr: |
+        sum(rate(apiserver_request_total{job="apiserver"}[5m])) by (code, verb)
+
+---
+# Example: ClusterPodMonitoring for cluster-wide resources
+#
+# Use ClusterPodMonitoring for resources that span namespaces
+# or need cluster-wide discovery.
+#
+# This is optional and not typically needed for HCP monitoring
+# (which is namespace-scoped), but included for completeness.
+apiVersion: monitoring.googleapis.com/v1
+kind: ClusterPodMonitoring
+metadata:
+  name: kube-state-metrics
+  labels:
+    app.kubernetes.io/name: kube-state-metrics
+    app.kubernetes.io/component: monitoring
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kube-state-metrics
+
+  endpoints:
+  - port: http-metrics
+    interval: 30s
+
+---
+# Note: NetworkPolicy changes required in hypershift repository
+#
+# The openshift-monitoring NetworkPolicy in each HCP namespace needs to be
+# updated to allow traffic from gke-gmp-system namespace.
+#
+# This change would be made in the hypershift codebase, not here.
+#
+# Example modification to the NetworkPolicy:
+#
+# apiVersion: networking.k8s.io/v1
+# kind: NetworkPolicy
+# metadata:
+#   name: openshift-monitoring
+#   namespace: clusters-xxx-test-hc-2
+# spec:
+#   ingress:
+#   - from:
+#     # Existing rule
+#     - namespaceSelector:
+#         matchLabels:
+#           network.openshift.io/policy-group: monitoring
+#     # NEW RULE: Allow GMP collectors from gke-gmp-system
+#     - namespaceSelector:
+#         matchLabels:
+#           kubernetes.io/metadata.name: gke-gmp-system
+#   podSelector: {}
+#   policyTypes:
+#   - Ingress
+
+---
+# Deployment Notes:
+#
+# 1. Deploy ClusterRole and ClusterRoleBinding ONCE per cluster:
+#    kubectl apply -f gmp-podmonitoring-example.yaml --selector=app.kubernetes.io/name=gmp-collector-secret-access
+#
+# 2. For each HCP namespace, deploy PodMonitoring and Rules:
+#    - Replace 'clusters-CLUSTER-ID-NAMESPACE' with actual namespace
+#    - Deploy converted PodMonitoring for each ServiceMonitor/PodMonitor
+#    - Deploy converted Rules for each PrometheusRule
+#
+# 3. Update hypershift repository:
+#    - Modify NetworkPolicy template to allow gke-gmp-system
+#    - Update monitoring resource templates to use PodMonitoring/Rules CRDs
+#
+# 4. Verify:
+#    kubectl get podmonitoring -A
+#    kubectl get rules -A
+#
+#    # Check GMP collector logs
+#    kubectl logs -n gke-gmp-system -l app.kubernetes.io/name=collector
+#
+# 5. Monitor in Google Cloud Console:
+#    - Navigate to Cloud Monitoring > Metrics Explorer
+#    - Query for metrics from your HCP namespaces
+#    - Verify recording rules are being evaluated
+
+---
+# Migration Checklist:
+#
+# Per HCP namespace monitoring resources to convert (~14 monitors, ~1-2 rules):
+# - [ ] ServiceMonitor: kube-apiserver → PodMonitoring
+# - [ ] ServiceMonitor: etcd → PodMonitoring
+# - [ ] ServiceMonitor: kube-controller-manager → PodMonitoring
+# - [ ] ServiceMonitor: kube-scheduler → PodMonitoring
+# - [ ] ServiceMonitor: openshift-apiserver → PodMonitoring
+# - [ ] ServiceMonitor: openshift-controller-manager → PodMonitoring
+# - [ ] ServiceMonitor: cluster-policy-controller → PodMonitoring
+# - [ ] PodMonitor: capi-provider → PodMonitoring
+# - [ ] PodMonitor: cluster-api → PodMonitoring
+# - [ ] ... (additional monitors as needed, ~14 total per namespace)
+# - [ ] PrometheusRule: recording-rules → Rules
+# - [ ] PrometheusRule: alerting-rules → Rules (or use GCM alerts)
+#
+# SCALE CONSIDERATION:
+# - Each HCP namespace has ~14 ServiceMonitors/PodMonitors + ~1-2 PrometheusRules
+# - For 100 clusters: ~1,400 monitors + ~100-200 rules to convert
+# - All conversions must be maintained in hypershift repository templates
+#
+# Hypershift repository changes:
+# - [ ] Update NetworkPolicy template for openshift-monitoring
+# - [ ] Update monitoring resource templates to use PodMonitoring CRD
+# - [ ] Update recording rule templates to use Rules CRD
+# - [ ] Update documentation
+# - [ ] Test in development environment
+#
+# One-time cluster configuration:
+# - [ ] Deploy ClusterRole for secret access
+# - [ ] Deploy ClusterRoleBinding for GMP collector
+# - [ ] Verify GMP is enabled in GKE cluster
+# - [ ] Test PodMonitoring in one HCP namespace
+# - [ ] Roll out to all HCP namespaces
+
+---
+# Comparison to ServiceMonitor/PodMonitor/PrometheusRule:
+#
+# ServiceMonitor → PodMonitoring differences:
+# - 'tlsConfig' becomes 'tls'
+# - 'configMap' for CA not supported (must use secret)
+# - 'keySecret' becomes 'key'
+# - Some relabeling options may differ
+#
+# PrometheusRule → Rules differences:
+# - Different CRD group: monitoring.googleapis.com vs monitoring.coreos.com
+# - May have different PromQL capabilities
+# - Evaluated by GMP backend vs local Prometheus
+# - Check GMP documentation for exact syntax
+#
+# PodMonitor → PodMonitoring:
+# - Very similar, mostly field name changes
+# - Same selector and endpoint concepts
+# - TLS configuration differences as above
