@@ -1,0 +1,176 @@
+---
+# ServiceAccount for cluster-wide Prometheus
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus-cluster-wide
+  namespace: openshift-monitoring
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/component: monitoring
+  annotations:
+    # Workload Identity binding
+    iam.gke.io/gcp-service-account: prometheus-agent-hcp@<GCP_PROJECT_ID>.iam.gserviceaccount.com
+
+---
+# ClusterRole for cluster-wide Prometheus
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus-cluster-wide
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/component: monitoring
+rules:
+  # Access to secrets and configmaps cluster-wide
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get", "list", "watch"]
+
+  # Access for service discovery cluster-wide
+  - apiGroups: [""]
+    resources: ["pods", "services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+
+  # Access to nodes for node-level metrics
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/metrics"]
+    verbs: ["get", "list", "watch"]
+
+  # Access to namespaces
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+
+---
+# ClusterRoleBinding for cluster-wide Prometheus
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus-cluster-wide
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/component: monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus-cluster-wide
+subjects:
+  - kind: ServiceAccount
+    name: prometheus-cluster-wide
+    namespace: openshift-monitoring
+
+---
+# Prometheus Custom Resource (cluster-wide scraping)
+apiVersion: monitoring.coreos.com/v1
+kind: Prometheus
+metadata:
+  name: cluster-wide
+  namespace: openshift-monitoring
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/component: monitoring
+spec:
+  # Use Google's Prometheus image with built-in GCM exporter
+  image: gke.gcr.io/prometheus-engine/prometheus:v2.53.5-gmp.1-gke.2
+  version: v2.53.5-gmp.1-gke.2
+
+  # ServiceAccount with cluster-wide permissions
+  serviceAccountName: prometheus-cluster-wide
+
+  # Replicas
+  replicas: 1
+
+  # Resources
+  # These values are sized for production scale (~100 HCP namespaces)
+  # Adjust based on actual metrics volume and cardinality
+  # Test environment (3 clusters) used ~40m CPU, ~280Mi RAM actual
+  resources:
+    requests:
+      cpu: 1000m
+      memory: 4Gi
+    limits:
+      cpu: 4000m
+      memory: 8Gi
+
+  # Security Context
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    fsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+
+  # External labels (will be added to all metrics)
+  externalLabels:
+    project_id: "<GCP_PROJECT_ID>"
+    location: "<GCP_REGION>"
+    cluster: "<GKE_CLUSTER_NAME>"
+    prometheus: "cluster-wide"
+
+  # ServiceMonitor selector - select ALL ServiceMonitors cluster-wide
+  serviceMonitorNamespaceSelector: {}
+  serviceMonitorSelector: {}
+
+  # PodMonitor selector - select ALL PodMonitors cluster-wide
+  podMonitorNamespaceSelector: {}
+  podMonitorSelector: {}
+
+  # PrometheusRule selector - select ALL PrometheusRules cluster-wide
+  ruleNamespaceSelector: {}
+  ruleSelector: {}
+
+  # Scrape interval and timeout
+  scrapeInterval: 30s
+  scrapeTimeout: 20s
+  evaluationInterval: 30s
+
+  # Retention (minimal since we're exporting to GCM)
+  retention: 6h
+
+  # Log level
+  logLevel: info
+  logFormat: logfmt
+
+  # Port
+  portName: http-web
+
+  # Web configuration
+  web:
+    httpConfig: {}
+
+  # OPTIONAL: Cost Optimization via Metric Relabeling
+  # Uncomment and customize to drop high-cardinality metrics before export to GCM
+  # Use Prometheus UI (port-forward to :9090) to identify expensive metrics
+  #
+  # Example: Drop histogram buckets to reduce cardinality
+  # additionalScrapeConfigs: |
+  #   - job_name: 'metric-relabeling-example'
+  #     metric_relabel_configs:
+  #     # Drop all histogram buckets (keep summaries and counters)
+  #     - source_labels: [__name__]
+  #       regex: '.*_bucket'
+  #       action: drop
+  #     # Drop specific high-cardinality apiserver metrics
+  #     - source_labels: [__name__]
+  #       regex: 'apiserver_request_duration_seconds_bucket'
+  #       action: drop
+  #     # Drop verbose workqueue metrics
+  #     - source_labels: [__name__]
+  #       regex: 'workqueue_.*'
+  #       action: drop
+
+  # Storage for rule evaluation and short-term retention
+  # Size for production scale (~100 clusters with recording rules)
+  # 6h retention at 30s scrape interval
+  # Adjust based on actual metrics cardinality and retention needs
+  storage:
+    volumeClaimTemplate:
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 50Gi
+
+  # NOTE: Do NOT add remoteWrite - the Google Prometheus image uses
+  # built-in GCM exporter with Workload Identity for authentication
