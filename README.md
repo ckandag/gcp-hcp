@@ -34,6 +34,13 @@ Replace `<path-to-local-clone>` with the path to your local clone of this repo (
 
 Skills are then available in every session, from any repository.
 
+**Updating** (after pulling new changes):
+
+```bash
+/plugin marketplace update gcp-hcp
+/plugin update gcp-hcp@gcp-hcp
+```
+
 **Option 2: Per-session**
 
 ```bash
