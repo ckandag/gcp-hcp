@@ -144,6 +144,18 @@ type GCPPrivateServiceConnectStatus struct {
     // DNSZones contains DNS zone information created for this cluster
     DNSZones []DNSZoneStatus `json:"dnsZones,omitempty"`
 }
+
+**DNSZoneStatus**
+```go
+// DNSZoneStatus represents DNS zone information
+type DNSZoneStatus struct {
+    // Name is the DNS zone name
+    Name string `json:"name"`
+
+    // Records lists the DNS records created in this zone
+    Records []string `json:"records,omitempty"`
+}
+```
 ```
 
 **Complete CRD Definition**

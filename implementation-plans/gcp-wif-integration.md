@@ -76,7 +76,7 @@ sequenceDiagram
     participant WIP as Workload Identity Pool
     participant GSA as Google Service Accounts
     
-    User->>CLI: hypershift create iam gcp<br/>--infra-id my-cluster<br/>--project-id my-project<br/>--cluster-oidc-jwks-file jwks.json
+    User->>CLI: hypershift create iam gcp<br/>--infra-id my-cluster<br/>--project-id my-project<br/>--oidc-jwks-file jwks.json
     
     Note over CLI,GSA: Validation Phase
     CLI->>GCP: Validate project access & APIs
@@ -107,7 +107,7 @@ sequenceDiagram
     GCP-->>CLI: All roles assigned
     
     Note over CLI,GSA: Identity Federation
-    CLI->>GCP: Create WIF binding for storage K8s SA → storage GSA
+    CLI->>GCP: Create WIF binding for gcp-pd-csi K8s SA → gcp-pd-csi GSA
     GCP-->>CLI: Binding created
     
     CLI->>GCP: Create WIF bindings for all K8s SAs...
@@ -305,7 +305,7 @@ type GCPPlatformSpec struct {
     // workloadIdentity configures Workload Identity Federation
     // +required
     // +immutable
-    WorkloadIdentity GCPWorkloadIdentityConfig `json:"workloadIdentity,omitempty"`
+    WorkloadIdentity GCPWorkloadIdentityConfig `json:"workloadIdentity,omitzero"`
 }
 
 type GCPWorkloadIdentityConfig struct {
@@ -319,7 +319,7 @@ type GCPWorkloadIdentityConfig struct {
     ProviderID string `json:"providerID,omitempty"`
 
     // serviceAccountsEmails contains Google Service Account emails
-    ServiceAccountsEmails GCPServiceAccountsEmails `json:"serviceAccountsEmails,omitempty"`
+    ServiceAccountsEmails GCPServiceAccountsEmails `json:"serviceAccountsEmails,omitzero"`
 }
 
 type GCPServiceAccountsEmails struct {
@@ -370,7 +370,7 @@ hypershift destroy iam gcp [flags]
 
 - **Resource validation**: Verifies resources belong to the specified cluster before deletion
 - **Error handling**: Continues cleanup even if some resources are already deleted
-- **Already-exists detection**: Handles idempotent creation via `isAlreadyExistsError()` checks
+- **Not-found detection**: Handles idempotent cleanup via `isNotFoundError()` checks
 
 
 

@@ -5,7 +5,7 @@ This file provides guidance to AI agents when working with code in this reposito
 # General Guidelines
 
 - Use MCPs where appropriate.
-- Always use the architect agent to review changes to `architecture/`, `design-decisions/`, or any code changes.
+- Always use the architect agent to review changes to `experiments/arch/`, `design-decisions/`, or any code changes.
 
 # Meta Rules
 
@@ -31,6 +31,8 @@ The skill is automatically invoked when:
 
 For detailed MCP tool integration examples, see the upstream skill documentation.
 
+# GCP HCP Plugin
+
 ## Architecture Skill
 
 The `gcp-hcp-architecture` skill provides architectural context and design decisions for agents working on GCP HCP code. It is auto-invoked when working on GCP platform changes and can be manually invoked with an optional topic filter.
@@ -39,13 +41,6 @@ Topics: networking, identity, observability, infrastructure, ingress, storage, o
 
 **Keeping the skill in sync:** When adding new design decisions, implementation plans, incidents, or SLOs, update the architecture skill's topic index in `claude-plugin/gcp-hcp/skills/gcp-hcp-architecture/SKILL.md` with a link to the new file under the appropriate topic.
 
-## Repository Knowledge Map
-
-- **Design Decisions**: `design-decisions/` — architectural decisions with rationale and trade-offs
-- **Implementation Plans**: `implementation-plans/` — active feature implementation plans
-- **Architecture**: `experiments/arch/` — L1 Context, L2 Container, L3 Component decomposition
-- **Studies**: `studies/` — deep-dive analysis (e.g., WIF SA key management)
-- **Quality Standards**: `docs/definition-of-done.md`, `docs/jira-story-template.md`
 
 # Security Rules
 
