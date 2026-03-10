@@ -126,7 +126,7 @@ Config Connector resources are Kubernetes manifests -- the engineer's workflow i
 
 - **Lane 1** has the highest privilege (project creation, VPC management, IAM binding). All changes go through PR review with Terraform plan output.
 - **Lane 2** uses Workload Identity scoped per GCP project. Config Connector permissions are broad today (`roles/editor`) and will be scoped down to a limited subset of managed resource types. Kubernetes RBAC on Config Connector resources per namespace can provide additional access control.
-- **IAM ownership**: Terraform creates core platform IAM bindings (Config Connector, Atlantis, e2e service accounts). Application-level IAM bindings (e.g., access to a database or PubSub) are deployed alongside the application via Config Connector.
+- **IAM ownership**: Terraform creates core platform IAM bindings (Config Connector, Atlantis, e2e service accounts). Application-level IAM bindings (e.g., access to a database or PubSub) are deployed alongside the application via Config Connector. Cross-project IAM bindings always belong in Lane 1 (Terraform), even when they grant access for application-level use cases -- this prevents applications from escalating permissions across project boundaries.
 
 ### Operability
 
@@ -150,6 +150,7 @@ Terraform manages GCP resources that form the platform foundation -- things that
 - DNS zones
 - Secret Manager secrets for platform configuration (cluster metadata, git credentials, infrastructure tool credentials)
 - Platform-level IAM: project-level role bindings, cross-project bindings, service accounts for infrastructure tools
+- Cross-cluster communication infrastructure (e.g., Maestro PubSub topics, subscriptions, and associated IAM between region and MC)
 - Artifact Registry repositories
 
 **What does NOT belong here:**
@@ -230,7 +231,8 @@ Is it a GCP resource?
 
 The key question for GCP resources is: **is this foundational infrastructure?**
 
-- **"Does this resource need to exist before any application can run?"** (GKE cluster, VPC, Fleet membership, platform IAM) → YES: Lane 1 (Terraform).
+- **"Does this resource need to exist before any application can run?"** (GKE cluster, VPC, Fleet membership, platform IAM, cross-cluster communication) → YES: Lane 1 (Terraform).
+- **"Does this involve cross-project IAM bindings?"** → YES: Lane 1 (Terraform). Cross-project IAM is a security-sensitive operation that should not be delegated to application-level tooling.
 - **"Is this an application-level resource?"** → YES: Lane 2 (Config Connector). Deploy it alongside the app that owns it, or in a dedicated Config Connector stack (wave -5) if multiple apps depend on it.
 - When a non-foundational resource is shared across applications (e.g., PubSub topics enabling cross-app communication), it can be deployed as a standalone ArgoCD application at wave -5, or owned by one of the consuming apps. It does not need to be in Terraform.
 
@@ -248,6 +250,7 @@ The key question for GCP resources is: **is this foundational infrastructure?**
 | PubSub topic for an app | 2 | App-scoped, deployed as Config Connector CR |
 | App Workload Identity SA | 2 | App-scoped IAM via Config Connector |
 | App-specific firewall rule | 2 | App-scoped, deployed as Config Connector CR |
+| Maestro PubSub (region ↔ MC) | 1 | Cross-cluster communication infrastructure, created by MC Terraform |
 | Cross-cluster firewall rule | 1 | Platform networking, must exist before cluster |
 | Shared PubSub infrastructure | 2 | Non-foundational, deployed as Config Connector stack (wave -5) |
 | API Gateway, certificates | 2 | Application-level, deployed via Config Connector |
