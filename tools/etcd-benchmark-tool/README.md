@@ -4,7 +4,7 @@ Container image for generating etcd write pressure on HCP management clusters. U
 
 ## Image
 
-`quay.io/cveiga/etcd-benchmark-tool:v3.5.21-2`
+`quay.io/cveiga/etcd-benchmark-tool:v3.5.21-3`
 
 > **Note**: This is a temporary personal repo. The image will be moved to an official registry once one is established for the project.
 
@@ -17,17 +17,18 @@ On startup, the container launches parallel `benchmark put` workers that write 1
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WORKERS` | 1 | Number of parallel PUT workers |
+| `RANGE_WORKERS` | 0 | Number of parallel RANGE workers |
 | `CLIENTS` | 50 | Concurrent gRPC clients per worker |
 | `KEY_SIZE` | 256 | Key size in bytes |
 | `VAL_SIZE` | 10240 | Value size in bytes |
 
 ### Presets (used by the start-benchmark workflow)
 
-| Preset | WORKERS | CLIENTS | Use case |
-|--------|---------|---------|----------|
-| light | 1 | 50 | Gentle pressure, good for testing alerts |
-| medium | 4 | 100 | Moderate load, triggers WARNING |
-| heavy | 8 | 200 | Full blast, triggers CRITICAL quickly |
+| Preset | WORKERS | RANGE_WORKERS | CLIENTS | Use case |
+|--------|---------|---------------|---------|----------|
+| light | 1 | 0 | 50 | Gentle write pressure, good for testing alerts |
+| medium | 4 | 2 | 100 | Moderate load (writes + reads), triggers WARNING |
+| heavy | 8 | 3 | 200 | Full blast, triggers CRITICAL quickly |
 
 ## TLS Requirements
 
@@ -42,8 +43,8 @@ These are standard across all HCP namespaces.
 ## Build
 
 ```bash
-podman build --platform linux/amd64 -t quay.io/cveiga/etcd-benchmark-tool:v3.5.21-2 .
-podman push quay.io/cveiga/etcd-benchmark-tool:v3.5.21-2
+podman build --platform linux/amd64 -t quay.io/cveiga/etcd-benchmark-tool:v3.5.21-3 .
+podman push quay.io/cveiga/etcd-benchmark-tool:v3.5.21-3
 ```
 
 ## Manual usage (without workflow)
@@ -66,7 +67,7 @@ spec:
     spec:
       containers:
         - name: benchmark
-          image: quay.io/cveiga/etcd-benchmark-tool:v3.5.21-2
+          image: quay.io/cveiga/etcd-benchmark-tool:v3.5.21-3
           imagePullPolicy: Always
           env:
             - name: WORKERS
