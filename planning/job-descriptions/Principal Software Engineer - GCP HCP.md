@@ -3,7 +3,7 @@
 
 **Job Summary**
 
-Red Hat Engineering is looking for a Principal Software Engineer to join the GCP Hosted Control Planes (HCP) team. This team builds and operates a managed service delivering OpenShift Kubernetes clusters on Google Cloud Platform using HyperShift, hosting dense multi-tenant control planes on GKE infrastructure. You will join a technical staff that includes principal and senior principal engineers reporting to the Director of Software Engineering.
+Red Hat Engineering is looking for a Principal Software Engineer to join the GCP Hosted Control Planes (HCP) team. This team builds and operates a managed service delivering OpenShift Kubernetes clusters on Google Cloud Platform using HyperShift, hosting dense multi-tenant control planes on GKE infrastructure.
 
 This role sits at the intersection of distributed systems architecture and a new engineering discipline. Our team has adopted an agent-first development methodology where AI coding agents are a primary production mechanism, and engineers function as harness engineers — designing the systems, constraints, and feedback loops that make agent-driven development reliable and scalable. As a Principal Engineer, you will not only work within this model but lead its evolution: defining the architectural boundaries agents must respect, designing the documentation architecture that serves as the agent knowledge base, building the enforcement mechanisms (custom linters, structural tests, CI gates) that prevent entropy, and mentoring the team in effective human-agent collaboration patterns.
 
@@ -11,7 +11,7 @@ You will lead architectural decisions for a platform spanning GKE host clusters,
 
 **Responsibilities**
 
-* Lead the design of the GCP HCP platform architecture, including multi-region control plane hosting, networking isolation (Private Service Connect), identity federation, and lifecycle management
+* Lead the design of the GCP HCP platform architecture, including multi-region scalability, multi-tenancy and isolation, automated lifecycle management, and operational resilience
 * Design and evolve the team's harness engineering infrastructure: the system of architectural constraints, custom linters, structural tests, CI gates, and feedback loops that enable AI agents to produce reliable work at scale
 * Define and maintain the team's documentation architecture — a structured knowledge base that serves as the single source of truth for both agents and engineers, treating AGENTS.md as the table of contents with deep references into design documents, architecture decision records, and operational runbooks
 * Decompose complex system goals into well-bounded building blocks suitable for agent-driven implementation; evaluate when agent-generated approaches are sound and when they introduce unacceptable risk
@@ -38,12 +38,12 @@ You will lead architectural decisions for a platform spanning GKE host clusters,
 
 **Preferred Skills**
 
+* Deep experience with GKE, GCP networking, GCP IAM, and Workload Identity Federation
 * Experience with HyperShift, Cluster API, or multi-tenant Kubernetes hosting architectures
-* Experience with GKE, GCP networking (Private Service Connect, VPC peering), GCP IAM, and Workload Identity Federation
-* Experience designing or operating managed/hosted cloud services under SLA
-* Experience building developer tooling, custom linters, static analysis frameworks, or architectural test suites (e.g., ArchUnit-style structural testing)
-* Experience with infrastructure-as-code (Terraform), GitOps (ArgoCD), and pipeline orchestration (Tekton)
+* Experience designing custom linters, static analysis frameworks, or architectural test suites
+* Experience with infrastructure-as-code and GitOps tools (Terraform, Tekton, ArgoCD)
 * Experience with observability at scale (Prometheus, Google Managed Prometheus, distributed tracing)
-* Contributions to open source projects, particularly in the Kubernetes ecosystem
-* Experience designing documentation systems, knowledge bases, or context architectures for AI/LLM-based tools
-* Familiarity with the emerging practices around harness engineering: entropy management, constraint-as-multiplier design, agent feedback loops, and structured codebase context
+* Track record of contributions to open source projects, particularly in the Kubernetes ecosystem
+* Experience designing or operating managed/hosted cloud services under SLA
+* Experience designing documentation systems or context architectures for AI/LLM-based tools
+* Familiarity with harness engineering practices: entropy management, constraint-as-multiplier design, agent feedback loops, and structured codebase context

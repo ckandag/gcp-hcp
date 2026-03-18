@@ -7,7 +7,7 @@ Red Hat Engineering is looking for Senior Software Engineers to join the GCP Hos
 
 This is not a traditional software engineering role. Our team practices an agent-first development methodology where AI coding agents are a primary mechanism for producing, testing, and maintaining code. Engineers on this team function as harness engineers: they design the environments, constraints, and feedback loops that enable AI agents to do reliable work, while applying deep technical judgment to specify intent, review output, and maintain architectural integrity. You will write code, but you will also spend significant time crafting the documentation, linters, structural tests, and CI gates that keep both human and agent contributors producing high-quality, architecturally consistent work.
 
-You'll work as part of a distributed engineering team alongside principal and senior principal engineers, contributing to a platform built on Go, Kubernetes, GKE, Terraform, Tekton, and ArgoCD. You'll participate in open source communities and help deliver enterprise-grade managed Kubernetes at scale.
+You'll work as part of a distributed engineering team, contributing to a platform built on Go, Kubernetes, GKE, Terraform, Tekton, and ArgoCD. You'll participate in open source communities and help deliver enterprise-grade managed Kubernetes at scale.
 
 **Responsibilities**
 
@@ -36,11 +36,11 @@ You'll work as part of a distributed engineering team alongside principal and se
 
 **Preferred Skills**
 
-* Experience with GKE, GCP networking (Private Service Connect, VPC), or GCP IAM and Workload Identity Federation
+* Experience with GKE, GCP networking, GCP IAM, or Workload Identity Federation
 * Understanding of HyperShift or multi-tenant Kubernetes control plane architectures
 * Experience writing custom linters, static analysis rules, or structural/architectural tests
-* Experience with infrastructure-as-code tools (Terraform, Tekton, ArgoCD)
-* Experience with observability systems (Prometheus, Google Managed Prometheus, Grafana)
-* Understanding of how open source communities work; contributions to Kubernetes or OpenShift upstream projects
-* Experience designing or maintaining CI/CD pipelines that serve as quality gates for automated code generation
+* Experience with infrastructure-as-code and GitOps tools (Terraform, Tekton, ArgoCD)
+* Experience with observability systems (Prometheus, Google Managed Prometheus)
+* Participation in open source communities; contributions to Kubernetes or OpenShift upstream projects
+* Experience designing or maintaining CI/CD pipelines that serve as quality gates for agent-generated code
 * Familiarity with prompt engineering, agent context design, or structured documentation practices for AI-assisted development

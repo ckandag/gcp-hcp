@@ -3,7 +3,7 @@
 
 **Job Summary**
 
-Red Hat Engineering is looking for a Software Engineering Manager to join the GCP Hosted Control Planes (HCP) team. This team builds and operates a managed service delivering OpenShift Kubernetes clusters on Google Cloud Platform using HyperShift. You will manage a team of senior engineers and work alongside a strong bench of principal and senior principal engineers, all reporting to the Director of Software Engineering.
+Red Hat Engineering is looking for a Software Engineering Manager to join the GCP Hosted Control Planes (HCP) team. This team builds and operates a managed service delivering OpenShift Kubernetes clusters on Google Cloud Platform using HyperShift.
 
 This team operates differently from a traditional software engineering organization. We practice an agent-first development methodology where AI coding agents are a primary production mechanism, and our engineers function as harness engineers — designing environments, specifying intent, and building feedback loops that enable agents to produce reliable work. As Engineering Manager, you will lead a team through this evolving model: hiring engineers who thrive in agent-augmented workflows, developing your team's harness engineering skills, establishing processes that maintain quality and velocity when much of the code is agent-generated, and defining what engineering excellence looks like when the engineer's primary job is no longer typing code.
 
