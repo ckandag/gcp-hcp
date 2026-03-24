@@ -46,7 +46,7 @@ Each stage can be implemented incrementally. All three coexist in production.
 
 * **Justification**: The three-stage approach matches increasing trust levels to increasing autonomy. Stage 1 is already deployed. Stage 2 reuses existing PAM infrastructure with zero new services. Stage 3 is architecturally separate from the AI agent, avoiding the "AI with destructive access" trust problem entirely by encoding well-known procedures as deterministic workflows.
 
-* **Evidence**: During the architecture analysis (see [full RFC](https://github.com/openshift-online/gcp-hcp-infra/blob/main/docs/GCP-481-agent-pam-full.md)), we evaluated 6 architecture options for agent-side PAM. The key findings were:
+* **Evidence**: During the architecture analysis, we evaluated 6 architecture options for agent-side PAM. The key findings were:
   - Granting PAM to a shared agent SA fails per-user isolation (PAM grants are per-principal — one user's grant benefits all concurrent users of the same SA)
   - Cloud Run cannot impersonate its caller, making server-side per-user execution impossible
   - The "agent proposes, CLI executes" model (Stage 2) is the only architecture that provides per-user isolation, user-identity audit trails, AND prompt injection defense simultaneously
@@ -101,7 +101,6 @@ Each stage can be implemented incrementally. All three coexist in production.
 ---
 
 **Related documents**:
-- [Full architecture analysis (6 options, PAM API capabilities, per-requirement evaluations)](https://github.com/openshift-online/gcp-hcp-infra/blob/main/docs/GCP-481-agent-pam-full.md)
 - [PAM Workflow Gating design decision](pam-workflow-gating.md)
 - [Cloud Workflows Automation Platform design decision](cloud-workflows-automation-platform.md)
 - [GCP-320: Automated Remediation Platform Scaffolding](https://redhat.atlassian.net/browse/GCP-320)
