@@ -41,7 +41,6 @@ Topics: networking, identity, observability, infrastructure, ingress, storage, o
 
 **Keeping the skill in sync:** When adding new design decisions, implementation plans, incidents, or SLOs, update the architecture skill's topic index in `claude-plugin/gcp-hcp/skills/gcp-hcp-architecture/SKILL.md` with a link to the new file under the appropriate topic.
 
-
 # Security Rules
 
 ### Security Principles
