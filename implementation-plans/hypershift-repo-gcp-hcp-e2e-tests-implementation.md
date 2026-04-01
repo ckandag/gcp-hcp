@@ -36,12 +36,12 @@ Configure end-to-end tests for the GCP platform in the HyperShift repository. Th
 │                 │                                                                   │
 │                 ▼                                                                   │
 │  3. Create Dynamic Projects (under CI folder)                                       │
-│     `gcloud projects create ${INFRA_ID}-mgmt --folder=${CI_FOLDER_ID}`              │
-│     `gcloud projects create ${INFRA_ID}-customer --folder=${CI_FOLDER_ID}`          │
+│     `gcloud projects create ${INFRA_ID}-control-plane --folder=${CI_FOLDER_ID}`              │
+│     `gcloud projects create ${INFRA_ID}-hosted-cluster --folder=${CI_FOLDER_ID}`          │
 │                 │                                                                   │
 │                 ▼                                                                   │
 │  ┌────────────────────────────────────┐    ┌────────────────────────────────────┐   │
-│  │  MANAGEMENT PROJECT (dynamic)      │    │   CUSTOMER PROJECT (dynamic)       │   │
+│  │  CONTROL PLANE PROJECT (dynamic)      │    │   HOSTED CLUSTER PROJECT (dynamic)       │   │
 │  ├────────────────────────────────────┤    ├────────────────────────────────────┤   │
 │  │                                    │    │                                    │   │
 │  │  4. Create GKE Autopilot Cluster   │    │  6. Create IAM (WIF)               │   │
@@ -87,13 +87,13 @@ Configure end-to-end tests for the GCP platform in the HyperShift repository. Th
 │      `hypershift destroy cluster gcp --name=${CLUSTER_NAME}`                        │
 │                 │                                                                   │
 │                 ▼                                                                   │
-│  11. Delete Management Cluster                                                      │
+│  11. Delete Control Plane Cluster                                                      │
 │      `gcloud container clusters delete ${CLUSTER_NAME} --quiet`                     │
 │                 │                                                                   │
 │                 ▼                                                                   │
 │  12. Delete Dynamic Projects (all remaining resources deleted with projects)        │
-│      `gcloud projects delete ${INFRA_ID}-customer --quiet`                          │
-│      `gcloud projects delete ${INFRA_ID}-mgmt --quiet`                              │
+│      `gcloud projects delete ${INFRA_ID}-hosted-cluster --quiet`                          │
+│      `gcloud projects delete ${INFRA_ID}-control-plane --quiet`                              │
 │                 │                                                                   │
 │                 ▼                                                                   │
 │  13. Release Boskos Lease                                                           │
@@ -133,7 +133,7 @@ Before implementing the CI infrastructure, we need team decisions on several arc
 **Resolved Investigation Items**:
 - [x] How to request GCP credentials for CI → Self-service via Vault. See [Adding a New Secret to CI](https://docs.ci.openshift.org/docs/how-tos/adding-a-new-secret-to-ci/).
 - [x] Hosted cluster credential strategy → Two-project architecture. See Appendix G.
-- [x] Investigate `hypershift infra gcp` credential requirements → Uses ADC, creates WIF in customer project. See Appendix G.
+- [x] Investigate `hypershift infra gcp` credential requirements → Uses ADC, creates WIF in hosted-cluster project. See Appendix G.
 - [x] Required GCP IAM roles and permissions → See Appendix G for complete IAM roles table.
 - [x] Quota requirements for running E2E tests → Standard quotas sufficient. GCP-HCP team will set appropriate limits during project setup.
 - [x] GCP Project Creation → Dynamic projects per-test. CI infrastructure (folder, project, SA) via Terraform in `gcp-hcp-infra`. See Story 2 and Appendix G.
@@ -156,20 +156,23 @@ Before implementing the CI infrastructure, we need team decisions on several arc
 **Summary**: Create CI folder, service account with project creator permissions, and store credentials in Vault
 
 **Description**:
-Set up the GCP infrastructure for dynamic project creation. Each E2E test run will create its own management and customer projects under a dedicated CI folder, ensuring complete isolation between tests.
+Set up the GCP infrastructure for dynamic project creation. Each E2E test run will create its own control-plane and hosted-cluster projects under a dedicated CI folder, ensuring complete isolation between tests.
 
 **Tasks**:
 1. **Create CI Folder** (manual, following GCP HCP Commons pattern):
-   - [ ] Create folder `gcp-hcp-ci` under the GCP HCP folder (`405445313657`) via GCP Console or gcloud
-   - [ ] Note the folder ID for use in Terraform
-   - [ ] This folder will contain all dynamically-created test projects
+   - [x] Create folder `gcp-hcp-ci` under the GCP HCP folder (`405445313657`) — folder ID: `614095012709`
+   - [x] This folder contains all dynamically-created test projects
 
 2. **Create Terraform module for CI infrastructure** (in `gcp-hcp-infra` repo):
-   - [ ] Create `terraform/modules/ci/` following the commons module pattern
-   - [ ] Accept `ci_folder_id` as input variable (same pattern as `commons_folder_id`)
-   - [ ] Use `terraform-google-modules/project-factory/google` to create CI project
+   - [ ] Create `terraform/modules/hypershift-ci/` with config at `terraform/config/hypershift-ci/`
+   - [ ] Accept `ci_folder_id` as input variable
+   - [ ] Use `terraform-google-modules/project-factory/google` to create CI project (`gcp-hcp-hypershift-ci`)
    - [ ] Create CI service account with direct folder-level permissions (not impersonation)
-   - [ ] Output SA key for Vault storage
+   - [ ] Create Cloud DNS zone (`hypershift-ci.gcp-hcp.openshiftapps.com`) for CI hosted cluster API endpoints
+   - [ ] Create ExternalDNS service account (`external-dns`) with `roles/dns.admin` for CI DNS management
+   - [ ] Grant `hypershift-ci` SA `roles/iam.serviceAccountAdmin` on ExternalDNS SA (for dynamic WIF bindings per test run)
+   - [ ] Include Atlantis IAM bootstrap pattern (viewer, serviceAccountAdmin, serviceAccountUser, serviceUsageAdmin, dnsAdmin, projectIamAdmin)
+   - [ ] SA key is NOT output by Terraform — generate via `gcloud iam service-accounts keys create` post-apply
 
    > **Note**: GCP doesn't have per-folder project limits. Concurrency control is via Boskos quota slices (e.g., 50 slots = max ~100 concurrent projects).
 
@@ -235,15 +238,17 @@ Create and configure the cluster profile that CI jobs will use. The profile must
      ```
 
 3. **Configure ci-secret-bootstrap** (PR to `openshift/release`):
-   - [ ] Add configuration linking Vault secret to cluster profile
-   - [ ] Ensure `hypershift-ci-jobs-gcpcreds` is accessible to the profile
+   - [x] Add configuration in `core-services/ci-secret-bootstrap/_config.yaml` creating secret `cluster-secrets-hypershift-gcp` in `ci` namespace on `non_app_ci` clusters (includes pull-secret dockerconfigJSON)
 
 4. **Configure as private profile** (PR to `openshift/release`):
-   - [ ] Add to `ci-operator/step-registry/cluster-profiles/cluster-profiles-config.yaml`:
+   - [x] Add to `ci-operator/step-registry/cluster-profiles/cluster-profiles-config.yaml`:
      ```yaml
      - profile: hypershift-gcp
        owners:
          - org: openshift
+           repos:
+             - hypershift
+         - org: openshift-priv
            repos:
              - hypershift
      ```
@@ -264,14 +269,14 @@ Create and configure the cluster profile that CI jobs will use. The profile must
 
 ### Story 4: GKE Provision/Deprovision Steps
 
-**Summary**: Create step registry entries for GKE management cluster lifecycle
+**Summary**: Create step registry entries for GKE control-plane cluster lifecycle
 
 **Description**:
-Create the step registry entries in `openshift/release` for provisioning and deprovisioning the GKE management cluster, following the AKS pattern.
+Create the step registry entries in `openshift/release` for provisioning and deprovisioning the GKE control-plane cluster, following the AKS pattern.
 
 **Prerequisites**: Story 2 (credentials available in Vault)
 
-**Reference**: AKS management cluster provisioning pattern:
+**Reference**: AKS control-plane cluster provisioning pattern:
 ```
 ci-operator/step-registry/aks/              # openshift/release
 ├── OWNERS
@@ -285,62 +290,96 @@ ci-operator/step-registry/aks/              # openshift/release
 
 **Deliverables**:
 
-1. **Step Registry Structure** (`ci-operator/step-registry/hypershift-gcp/`):
-   ```
-   ci-operator/step-registry/hypershift-gcp/
+1. **Step Registry Structure** (`ci-operator/step-registry/hypershift/gcp/`):
+   ```text
+   ci-operator/step-registry/hypershift/gcp/
    ├── OWNERS
-   ├── provision/
-   │   ├── gke-provision-ref.yaml
-   │   └── gke-provision-commands.sh
-   └── deprovision/
-       ├── gke-deprovision-ref.yaml
-       └── gke-deprovision-commands.sh
+   ├── control-plane-setup/
+   │   ├── hypershift-gcp-control-plane-setup-ref.yaml
+   │   └── hypershift-gcp-control-plane-setup-commands.sh
+   ├── create/
+   │   └── hypershift-gcp-create-chain.yaml
+   ├── destroy/
+   │   └── hypershift-gcp-destroy-chain.yaml
+   ├── gke/
+   │   ├── deprovision/
+   │   │   ├── hypershift-gcp-gke-deprovision-ref.yaml
+   │   │   └── hypershift-gcp-gke-deprovision-commands.sh
+   │   ├── e2e/
+   │   │   └── hypershift-gcp-gke-e2e-workflow.yaml
+   │   ├── e2e-v2/
+   │   │   └── hypershift-gcp-gke-e2e-v2-workflow.yaml
+   │   ├── prerequisites/
+   │   │   ├── hypershift-gcp-gke-prerequisites-ref.yaml
+   │   │   └── hypershift-gcp-gke-prerequisites-commands.sh
+   │   └── provision/
+   │       ├── hypershift-gcp-gke-provision-ref.yaml
+   │       └── hypershift-gcp-gke-provision-commands.sh
+   ├── hosted-cluster-setup/
+   │   ├── hypershift-gcp-hosted-cluster-setup-ref.yaml
+   │   └── hypershift-gcp-hosted-cluster-setup-commands.sh
+   └── run-e2e/
+       ├── hypershift-gcp-run-e2e-ref.yaml
+       └── hypershift-gcp-run-e2e-commands.sh
    ```
 
-2. **Provision Step** (`gke-provision-ref.yaml`, `gke-provision-commands.sh`)
-3. **Deprovision Step** (`gke-deprovision-ref.yaml`, `gke-deprovision-commands.sh`)
+2. **Provision Step** (`hypershift-gcp-gke-provision-ref.yaml`, `hypershift-gcp-gke-provision-commands.sh`)
+3. **Deprovision Step** (`hypershift-gcp-gke-deprovision-ref.yaml`, `hypershift-gcp-gke-deprovision-commands.sh`)
 
 **Management Cluster Provisioning Approach**:
 
-Follow the AKS pattern: provision a GKE-based management cluster per-test using simple `gcloud` commands (not Terraform). This keeps scripts simple and generic, reducing flakiness.
+Follow the AKS pattern: provision a GKE-based control-plane cluster per-test using simple `gcloud` commands (not Terraform). This keeps scripts simple and generic, reducing flakiness.
 
-**Step Registry Reference** (`gke-provision-ref.yaml`) - following AKS pattern:
+**Step Registry Reference** (`hypershift-gcp-gke-provision-ref.yaml`):
 ```yaml
 ref:
-  as: gke-provision
+  as: hypershift-gcp-gke-provision
   from_image:
     namespace: ocp
-    name: "4.16"
+    name: "4.22"
     tag: upi-installer
-  commands: gke-provision-commands.sh
+  commands: hypershift-gcp-gke-provision-commands.sh
   resources:
     requests:
       cpu: 100m
       memory: 100Mi
-  timeout: 30m0s
+  timeout: 45m0s
   grace_period: 10m0s
   env:
   - name: GKE_REGION
     default: "us-central1"
     documentation: GCP region for the GKE cluster.
-  credentials:
-    - mount_path: /etc/hypershift-ci-jobs-gcpcreds
-      name: hypershift-ci-jobs-gcpcreds
-      namespace: test-credentials
+  - name: GKE_RELEASE_CHANNEL
+    default: "stable"
+    documentation: "GKE release channel. Allowed values: rapid, regular, stable."
+  - name: HYPERSHIFT_GCP_CI_PROJECT
+    default: ""
+    documentation: "GCP project ID for persistent HyperShift CI resources"
+  - name: HYPERSHIFT_GCP_CI_DNS_DOMAIN
+    default: ""
+    documentation: "DNS domain for HyperShift CI hosted clusters"
   documentation: |-
-    This step provisions a GKE cluster for use as a HyperShift management cluster.
-    Follows pattern from ci-operator/step-registry/aks/provision/.
+    This step provisions a GKE Autopilot cluster for use as a HyperShift Control Plane cluster.
+    It creates dynamic GCP projects under the CI folder, sets up networking with VPC,
+    Cloud Router, NAT, and PSC subnet, then creates the GKE cluster.
+
+    The cluster profile must contain:
+    - credentials.json: GCP service account key with project creator/deleter permissions
+    - ci-folder-id: GCP folder ID where dynamic projects are created
+    - billing-account-id: GCP billing account ID to link projects
 ```
 
-**Provision Step** (`gke-provision-commands.sh`):
+> **Note**: Credentials are loaded from `CLUSTER_PROFILE_DIR/credentials.json` (mounted by the cluster profile), not from a separate secret mount.
+
+**Provision Step** (`hypershift-gcp-gke-provision-commands.sh`):
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Load GCP credentials from mounted secret
-GCP_CREDS_FILE="/etc/hypershift-ci-jobs-gcpcreds/credentials.json"
-CI_FOLDER_ID="$(<"/etc/hypershift-ci-jobs-gcpcreds/ci-folder-id")"
-BILLING_ACCOUNT_ID="$(<"/etc/hypershift-ci-jobs-gcpcreds/billing-account-id")"
+# Load GCP credentials from cluster profile
+GCP_CREDS_FILE="${CLUSTER_PROFILE_DIR}/credentials.json"
+CI_FOLDER_ID="$(<"${CLUSTER_PROFILE_DIR}/ci-folder-id")"
+BILLING_ACCOUNT_ID="$(<"${CLUSTER_PROFILE_DIR}/billing-account-id")"
 GCP_REGION="${GKE_REGION:-${LEASED_RESOURCE:-us-central1}}"
 
 # Authenticate with GCP
@@ -356,64 +395,64 @@ INFRA_ID="${RESOURCE_NAME_PREFIX}"
 PSC_SUBNET="${INFRA_ID}-psc"
 
 # Dynamic project IDs (created per-test)
-MGMT_PROJECT_ID="${INFRA_ID}-mgmt"
-CUSTOMER_PROJECT_ID="${INFRA_ID}-cust"
+CP_PROJECT_ID="${INFRA_ID}-control-plane"
+HC_PROJECT_ID="${INFRA_ID}-hosted-cluster"
 
 # ============================================================================
 # Step 1: Create Dynamic Projects (under CI folder)
 # ============================================================================
-echo "Creating management project: ${MGMT_PROJECT_ID}"
-gcloud projects create "${MGMT_PROJECT_ID}" \
+echo "Creating control-plane project: ${CP_PROJECT_ID}"
+gcloud projects create "${CP_PROJECT_ID}" \
     --folder="${CI_FOLDER_ID}" \
     --quiet
 
-echo "Creating customer project: ${CUSTOMER_PROJECT_ID}"
-gcloud projects create "${CUSTOMER_PROJECT_ID}" \
+echo "Creating hosted-cluster project: ${HC_PROJECT_ID}"
+gcloud projects create "${HC_PROJECT_ID}" \
     --folder="${CI_FOLDER_ID}" \
     --quiet
 
 # Link projects to billing account
 echo "Linking projects to billing account"
-gcloud billing projects link "${MGMT_PROJECT_ID}" \
+gcloud billing projects link "${CP_PROJECT_ID}" \
     --billing-account="${BILLING_ACCOUNT_ID}"
-gcloud billing projects link "${CUSTOMER_PROJECT_ID}" \
+gcloud billing projects link "${HC_PROJECT_ID}" \
     --billing-account="${BILLING_ACCOUNT_ID}"
 
-# Enable required APIs in management project
-echo "Enabling APIs in management project"
+# Enable required APIs in control-plane project
+echo "Enabling APIs in control-plane project"
 gcloud services enable container.googleapis.com compute.googleapis.com \
-    --project="${MGMT_PROJECT_ID}"
+    --project="${CP_PROJECT_ID}"
 
-# Enable required APIs in customer project
-echo "Enabling APIs in customer project"
+# Enable required APIs in hosted-cluster project
+echo "Enabling APIs in hosted-cluster project"
 gcloud services enable compute.googleapis.com dns.googleapis.com iam.googleapis.com \
     iamcredentials.googleapis.com cloudresourcemanager.googleapis.com \
-    --project="${CUSTOMER_PROJECT_ID}"
+    --project="${HC_PROJECT_ID}"
 
 # Wait for API enablement to propagate
 echo "Waiting for API enablement to propagate..."
 sleep 30
 
-gcloud config set project "${MGMT_PROJECT_ID}"
+gcloud config set project "${CP_PROJECT_ID}"
 
 # ============================================================================
-# Step 2: Create VPC and networking in management project
+# Step 2: Create VPC and networking in control-plane project
 # ============================================================================
-echo "Creating VPC in management project"
+echo "Creating VPC in control-plane project"
 gcloud compute networks create "${INFRA_ID}-vpc" \
-    --project="${MGMT_PROJECT_ID}" \
+    --project="${CP_PROJECT_ID}" \
     --subnet-mode=auto \
     --quiet
 
 echo "Creating Cloud Router and NAT"
 gcloud compute routers create "${INFRA_ID}-router" \
-    --project="${MGMT_PROJECT_ID}" \
+    --project="${CP_PROJECT_ID}" \
     --region="${GCP_REGION}" \
     --network="${INFRA_ID}-vpc" \
     --quiet
 
 gcloud compute routers nats create "${INFRA_ID}-nat" \
-    --project="${MGMT_PROJECT_ID}" \
+    --project="${CP_PROJECT_ID}" \
     --region="${GCP_REGION}" \
     --router="${INFRA_ID}-router" \
     --nat-all-subnet-ip-ranges \
@@ -425,7 +464,7 @@ gcloud compute routers nats create "${INFRA_ID}-nat" \
 # ============================================================================
 echo "Creating PSC subnet: ${PSC_SUBNET}"
 gcloud compute networks subnets create "${PSC_SUBNET}" \
-    --project="${MGMT_PROJECT_ID}" \
+    --project="${CP_PROJECT_ID}" \
     --region="${GCP_REGION}" \
     --network="${INFRA_ID}-vpc" \
     --range="10.3.0.0/24" \
@@ -437,7 +476,7 @@ gcloud compute networks subnets create "${PSC_SUBNET}" \
 # ============================================================================
 echo "Creating GKE Autopilot cluster: ${CLUSTER_NAME}"
 gcloud container clusters create-auto "${CLUSTER_NAME}" \
-    --project="${MGMT_PROJECT_ID}" \
+    --project="${CP_PROJECT_ID}" \
     --region="${GCP_REGION}" \
     --network="${INFRA_ID}-vpc" \
     --release-channel=stable \
@@ -445,20 +484,20 @@ gcloud container clusters create-auto "${CLUSTER_NAME}" \
 
 echo "Waiting for GKE cluster to be ready"
 gcloud container clusters describe "${CLUSTER_NAME}" \
-    --project="${MGMT_PROJECT_ID}" \
+    --project="${CP_PROJECT_ID}" \
     --region="${GCP_REGION}" \
     --format="value(status)" | grep -q "RUNNING"
 
 echo "Getting kubeconfig"
 export KUBECONFIG="${SHARED_DIR}/kubeconfig"
 gcloud container clusters get-credentials "${CLUSTER_NAME}" \
-    --project="${MGMT_PROJECT_ID}" \
+    --project="${CP_PROJECT_ID}" \
     --region="${GCP_REGION}"
 
 # Save cluster info for deprovision step
 echo "${CLUSTER_NAME}" > "${SHARED_DIR}/cluster-name"
-echo "${MGMT_PROJECT_ID}" > "${SHARED_DIR}/mgmt-project-id"
-echo "${CUSTOMER_PROJECT_ID}" > "${SHARED_DIR}/customer-project-id"
+echo "${CP_PROJECT_ID}" > "${SHARED_DIR}/control-plane-project-id"
+echo "${HC_PROJECT_ID}" > "${SHARED_DIR}/hosted-cluster-project-id"
 echo "${GCP_REGION}" > "${SHARED_DIR}/gcp-region"
 echo "${INFRA_ID}" > "${SHARED_DIR}/infra-id"
 echo "${PSC_SUBNET}" > "${SHARED_DIR}/psc-subnet"
@@ -482,28 +521,28 @@ hypershift install \
 kubectl wait --for=condition=Available deployment/operator -n hypershift --timeout=300s
 
 # ============================================================================
-# Step 6: Create IAM resources (WIF) in customer project
+# Step 6: Create IAM resources (WIF) in hosted-cluster project
 # ============================================================================
-echo "Creating IAM resources in customer project"
+echo "Creating IAM resources in hosted-cluster project"
 hypershift create iam gcp \
     --infra-id="${INFRA_ID}" \
-    --project-id="${CUSTOMER_PROJECT_ID}" \
+    --project-id="${HC_PROJECT_ID}" \
     --output-file="${SHARED_DIR}/iam-output.json"
 
 # ============================================================================
-# Step 7: Create network infrastructure in customer project
+# Step 7: Create network infrastructure in hosted-cluster project
 # ============================================================================
-echo "Creating network infrastructure in customer project"
+echo "Creating network infrastructure in hosted-cluster project"
 hypershift create infra gcp \
     --infra-id="${INFRA_ID}" \
-    --project-id="${CUSTOMER_PROJECT_ID}" \
+    --project-id="${HC_PROJECT_ID}" \
     --region="${GCP_REGION}" \
     --output-file="${SHARED_DIR}/infra-output.json"
 
 # Parse outputs and save for E2E step
 cat > "${SHARED_DIR}/e2e-env.sh" << EOF
-export MGMT_PROJECT_ID="${MGMT_PROJECT_ID}"
-export CUSTOMER_PROJECT_ID="${CUSTOMER_PROJECT_ID}"
+export CP_PROJECT_ID="${CP_PROJECT_ID}"
+export HC_PROJECT_ID="${HC_PROJECT_ID}"
 export GCP_REGION="${GCP_REGION}"
 export GCP_PROJECT_NUMBER=$(jq -r '.projectNumber' "${SHARED_DIR}/iam-output.json")
 export GCP_WIF_POOL_ID=$(jq -r '.workloadIdentityPool.poolId' "${SHARED_DIR}/iam-output.json")
@@ -516,21 +555,21 @@ export PSC_SUBNET="${PSC_SUBNET}"
 export INFRA_ID="${INFRA_ID}"
 EOF
 
-echo "GKE management cluster provisioned successfully"
+echo "GKE control-plane cluster provisioned successfully"
 ```
 
-**Deprovision Step** (`gke-deprovision-commands.sh`):
+**Deprovision Step** (`hypershift-gcp-gke-deprovision-commands.sh`):
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Load GCP credentials
-GCP_CREDS_FILE="/etc/hypershift-ci-jobs-gcpcreds/credentials.json"
+# Load GCP credentials from cluster profile
+GCP_CREDS_FILE="${CLUSTER_PROFILE_DIR}/credentials.json"
 gcloud auth activate-service-account --key-file="${GCP_CREDS_FILE}"
 
 # Load cluster info from provision step
-MGMT_PROJECT_ID="$(<"${SHARED_DIR}/mgmt-project-id")"
-CUSTOMER_PROJECT_ID="$(<"${SHARED_DIR}/customer-project-id")"
+CP_PROJECT_ID="$(<"${SHARED_DIR}/control-plane-project-id")"
+HC_PROJECT_ID="$(<"${SHARED_DIR}/hosted-cluster-project-id")"
 CLUSTER_NAME="$(<"${SHARED_DIR}/cluster-name")"
 GCP_REGION="$(<"${SHARED_DIR}/gcp-region")"
 INFRA_ID="$(<"${SHARED_DIR}/infra-id")"
@@ -547,9 +586,9 @@ set -x
 # ----------------------------------------------------------------------------
 # Step 1: Delete GKE cluster (blocks project deletion if running)
 # ----------------------------------------------------------------------------
-echo "Deleting GKE management cluster: ${CLUSTER_NAME}"
+echo "Deleting GKE control-plane cluster: ${CLUSTER_NAME}"
 gcloud container clusters delete "${CLUSTER_NAME}" \
-    --project="${MGMT_PROJECT_ID}" \
+    --project="${CP_PROJECT_ID}" \
     --region="${GCP_REGION}" \
     --quiet || true
 
@@ -557,7 +596,7 @@ gcloud container clusters delete "${CLUSTER_NAME}" \
 echo "Waiting for GKE cluster deletion to complete..."
 for i in {1..30}; do
     if ! gcloud container clusters describe "${CLUSTER_NAME}" \
-        --project="${MGMT_PROJECT_ID}" \
+        --project="${CP_PROJECT_ID}" \
         --region="${GCP_REGION}" 2>/dev/null; then
         echo "GKE cluster deleted successfully"
         break
@@ -570,15 +609,15 @@ done
 # Step 2: Delete VPC resources (can block project deletion)
 # VPC deletion order: firewall rules → routes → subnets → routers → VPC
 # ----------------------------------------------------------------------------
-echo "Cleaning up VPC resources in management project..."
+echo "Cleaning up VPC resources in control-plane project..."
 
 # Delete firewall rules
 echo "Deleting firewall rules..."
-for fw in $(gcloud compute firewall-rules list --project="${MGMT_PROJECT_ID}" \
+for fw in $(gcloud compute firewall-rules list --project="${CP_PROJECT_ID}" \
     --format="value(name)" 2>/dev/null); do
     echo "Deleting firewall rule: ${fw}"
     gcloud compute firewall-rules delete "${fw}" \
-        --project="${MGMT_PROJECT_ID}" --quiet || true
+        --project="${CP_PROJECT_ID}" --quiet || true
 done
 
 # Delete Cloud NAT
@@ -586,87 +625,87 @@ echo "Deleting Cloud NAT..."
 gcloud compute routers nats delete "${INFRA_ID}-nat" \
     --router="${INFRA_ID}-router" \
     --region="${GCP_REGION}" \
-    --project="${MGMT_PROJECT_ID}" \
+    --project="${CP_PROJECT_ID}" \
     --quiet || true
 
 # Delete Cloud Router
 echo "Deleting Cloud Router..."
 gcloud compute routers delete "${INFRA_ID}-router" \
     --region="${GCP_REGION}" \
-    --project="${MGMT_PROJECT_ID}" \
+    --project="${CP_PROJECT_ID}" \
     --quiet || true
 
 # Delete subnets (including PSC subnet)
 echo "Deleting subnets..."
-for subnet in $(gcloud compute networks subnets list --project="${MGMT_PROJECT_ID}" \
+for subnet in $(gcloud compute networks subnets list --project="${CP_PROJECT_ID}" \
     --filter="network~${INFRA_ID}-vpc" --format="value(name,region)" 2>/dev/null); do
     subnet_name=$(echo "$subnet" | cut -f1)
     subnet_region=$(echo "$subnet" | cut -f2)
     echo "Deleting subnet: ${subnet_name}"
     gcloud compute networks subnets delete "${subnet_name}" \
         --region="${subnet_region}" \
-        --project="${MGMT_PROJECT_ID}" \
+        --project="${CP_PROJECT_ID}" \
         --quiet || true
 done
 
 # Delete VPC network
 echo "Deleting VPC network..."
 gcloud compute networks delete "${INFRA_ID}-vpc" \
-    --project="${MGMT_PROJECT_ID}" \
+    --project="${CP_PROJECT_ID}" \
     --quiet || true
 
 # ----------------------------------------------------------------------------
-# Step 3: Clean up customer project resources
+# Step 3: Clean up hosted-cluster project resources
 # ----------------------------------------------------------------------------
-echo "Cleaning up customer project resources..."
+echo "Cleaning up hosted-cluster project resources..."
 
 # Delete VPC resources created by hypershift create infra gcp
-for fw in $(gcloud compute firewall-rules list --project="${CUSTOMER_PROJECT_ID}" \
+for fw in $(gcloud compute firewall-rules list --project="${HC_PROJECT_ID}" \
     --format="value(name)" 2>/dev/null); do
     gcloud compute firewall-rules delete "${fw}" \
-        --project="${CUSTOMER_PROJECT_ID}" --quiet || true
+        --project="${HC_PROJECT_ID}" --quiet || true
 done
 
-for router in $(gcloud compute routers list --project="${CUSTOMER_PROJECT_ID}" \
+for router in $(gcloud compute routers list --project="${HC_PROJECT_ID}" \
     --format="value(name,region)" 2>/dev/null); do
     router_name=$(echo "$router" | cut -f1)
     router_region=$(echo "$router" | cut -f2)
     # Delete NATs first
     for nat in $(gcloud compute routers nats list --router="${router_name}" \
-        --region="${router_region}" --project="${CUSTOMER_PROJECT_ID}" \
+        --region="${router_region}" --project="${HC_PROJECT_ID}" \
         --format="value(name)" 2>/dev/null); do
         gcloud compute routers nats delete "${nat}" \
             --router="${router_name}" --region="${router_region}" \
-            --project="${CUSTOMER_PROJECT_ID}" --quiet || true
+            --project="${HC_PROJECT_ID}" --quiet || true
     done
     gcloud compute routers delete "${router_name}" \
         --region="${router_region}" \
-        --project="${CUSTOMER_PROJECT_ID}" --quiet || true
+        --project="${HC_PROJECT_ID}" --quiet || true
 done
 
-for subnet in $(gcloud compute networks subnets list --project="${CUSTOMER_PROJECT_ID}" \
+for subnet in $(gcloud compute networks subnets list --project="${HC_PROJECT_ID}" \
     --format="value(name,region)" 2>/dev/null); do
     subnet_name=$(echo "$subnet" | cut -f1)
     subnet_region=$(echo "$subnet" | cut -f2)
     gcloud compute networks subnets delete "${subnet_name}" \
         --region="${subnet_region}" \
-        --project="${CUSTOMER_PROJECT_ID}" --quiet || true
+        --project="${HC_PROJECT_ID}" --quiet || true
 done
 
-for vpc in $(gcloud compute networks list --project="${CUSTOMER_PROJECT_ID}" \
+for vpc in $(gcloud compute networks list --project="${HC_PROJECT_ID}" \
     --format="value(name)" 2>/dev/null); do
     gcloud compute networks delete "${vpc}" \
-        --project="${CUSTOMER_PROJECT_ID}" --quiet || true
+        --project="${HC_PROJECT_ID}" --quiet || true
 done
 
 # ----------------------------------------------------------------------------
 # Step 4: Delete projects (now safe after explicit resource cleanup)
 # ----------------------------------------------------------------------------
-echo "Deleting customer project: ${CUSTOMER_PROJECT_ID}"
-gcloud projects delete "${CUSTOMER_PROJECT_ID}" --quiet || true
+echo "Deleting hosted-cluster project: ${HC_PROJECT_ID}"
+gcloud projects delete "${HC_PROJECT_ID}" --quiet || true
 
-echo "Deleting management project: ${MGMT_PROJECT_ID}"
-gcloud projects delete "${MGMT_PROJECT_ID}" --quiet || true
+echo "Deleting control-plane project: ${CP_PROJECT_ID}"
+gcloud projects delete "${CP_PROJECT_ID}" --quiet || true
 
 echo "Cleanup complete"
 ```
@@ -708,30 +747,41 @@ Create the workflow that orchestrates the E2E test execution and configure the C
 
 **Deliverables**:
 
-1. **Step Registry Structure** (additional steps):
-   ```
-   ci-operator/step-registry/hypershift-gcp/
-   ├── e2e/
-   │   ├── hypershift-gcp-e2e-ref.yaml
-   │   └── hypershift-gcp-e2e-commands.sh
-   └── gather/
-       ├── hypershift-gcp-gather-ref.yaml
-       └── hypershift-gcp-gather-commands.sh
-   ```
+1. **Step Registry Structure** (additional steps already included in Story 4 tree):
+   - `hypershift/gcp/run-e2e/` — E2E test runner
+   - `hypershift/gcp/gke/prerequisites/` — CRD and cert-manager installation
+   - `hypershift/gcp/control-plane-setup/` — GCP Workload Identity for PSC and ExternalDNS
+   - `hypershift/gcp/hosted-cluster-setup/` — WIF and network infrastructure for hosted clusters
+   - Gathering uses shared `hypershift-dump` chain (no dedicated GCP gather step)
 
-2. **Workflow Definition** (`hypershift-gcp-e2e-workflow.yaml`):
+2. **Workflow Definition** (`hypershift-gcp-gke-e2e-workflow.yaml`):
    ```yaml
    workflow:
-     as: hypershift-gcp-e2e
+     as: hypershift-gcp-gke-e2e
      steps:
        pre:
-         - chain: hypershift-gcp-provision
+       - ref: ipi-install-rbac
+       - ref: hypershift-gcp-gke-provision
+       - ref: hypershift-gcp-gke-prerequisites
+       - ref: hypershift-install
+       - ref: hypershift-gcp-control-plane-setup
+       - ref: hypershift-gcp-hosted-cluster-setup
        test:
-         - ref: hypershift-gcp-e2e
+       - ref: hypershift-gcp-run-e2e
        post:
-         - ref: hypershift-gcp-gather
-         - ref: hypershift-gcp-deprovision
+       - chain: hypershift-dump
+       - ref: hypershift-gcp-gke-deprovision
+       env:
+         CLOUD_PROVIDER: "GCP"
+         GKE_REGION: "us-central1"
+         GKE_RELEASE_CHANNEL: "stable"
+         TECH_PREVIEW_NO_UPGRADE: "true"
+         HYPERSHIFT_GCP_CI_PROJECT: "gcp-hcp-hypershift-ci"
+         HYPERSHIFT_GCP_CI_DNS_ZONE: "hypershift-ci-gcp-hcp-openshiftapps-com"
+         HYPERSHIFT_GCP_CI_DNS_DOMAIN: "hypershift-ci.gcp-hcp.openshiftapps.com"
    ```
+
+   > **Note**: A v2 variant (`hypershift-gcp-gke-e2e-v2`) also exists.
 
 3. **CI Operator Config** (`ci-operator/config/openshift/hypershift/openshift-hypershift-main.yaml`):
    - [ ] Add GCP E2E test job configuration
@@ -746,7 +796,7 @@ Create the workflow that orchestrates the E2E test execution and configure the C
 
 | Resource | Per-Test Cost (Est.) | Notes |
 | -------- | -------------------- | ----- |
-| GKE Autopilot Management Cluster | <cost-estimate> | Billed per pod resource usage, ~10-15 min runtime |
+| GKE Autopilot Control Plane Cluster | <cost-estimate> | Billed per pod resource usage, ~10-15 min runtime |
 | Hosted Cluster nodes | <cost-estimate> | Depends on test scenario |
 | Cloud DNS zones | <cost-estimate> | Usually 1-2 zones per test |
 | Network egress | Minimal | Intra-region traffic |
@@ -761,9 +811,9 @@ Create the workflow that orchestrates the E2E test execution and configure the C
 
 **Acceptance Criteria**:
 - [ ] Workflow definition passes CI validation
-- [ ] E2E and gather steps pass validation
+- [ ] E2E and run-e2e steps pass validation
 - [ ] CI operator config generates valid Prow job
-- [ ] Job can be triggered via `/test e2e-gcp` on PRs
+- [ ] Job can be triggered via `/test e2e-gke` on PRs
 
 ---
 
@@ -774,11 +824,11 @@ Create the workflow that orchestrates the E2E test execution and configure the C
 **Description**:
 Add GCP-specific command-line flags to `test/e2e/e2e_test.go` and platform options to `test/e2e/util/options.go` following the pattern used by AWS, Azure, and other platforms.
 
-> **Current State (as of Dec 2025)**: GCP is NOT yet integrated into the E2E test framework. The `cmd/cluster/gcp/create.go` file exists with `RawCreateOptions`, but there are no GCP flags in `e2e_test.go` and no `GCPPlatform` in the `DefaultClusterOptions` switch statement.
+> **Current State (as of Mar 2026)**: GCP is fully integrated into the E2E test framework. All `RawCreateOptions` fields from `cmd/cluster/gcp/create.go` are exposed as E2E flags and mapped through `DefaultGCPOptions()`.
 
-**Files to Modify**:
+**Files Modified**:
 
-1. **`test/e2e/util/options.go`** - Add import:
+1. **`test/e2e/util/options.go`** - Import:
    ```go
    import (
        // ... existing imports
@@ -786,9 +836,9 @@ Add GCP-specific command-line flags to `test/e2e/e2e_test.go` and platform optio
    )
    ```
 
-2. **`test/e2e/util/options.go`** - Add to `ConfigurableClusterOptions` struct (around line 178):
+2. **`test/e2e/util/options.go`** - `ConfigurableClusterOptions` struct (line 186):
    ```go
-   // GCP options (matching cmd/cluster/gcp/create.go RawCreateOptions)
+   // GCP Platform Configuration
    GCPProject                       string
    GCPRegion                        string
    GCPNetwork                       string
@@ -798,9 +848,19 @@ Add GCP-specific command-line flags to `test/e2e/e2e_test.go` and platform optio
    GCPWorkloadIdentityProviderID    string
    GCPNodePoolServiceAccount        string
    GCPControlPlaneServiceAccount    string
+   GCPCloudControllerServiceAccount string
+   GCPStorageServiceAccount         string
+   GCPImageRegistryServiceAccount   string
+   GCPServiceAccountSigningKeyPath  string
+   GCPEndpointAccess                string
+   GCPIssuerURL                     string
+   GCPMachineType                   string
+   GCPZone                          string
+   GCPSubnet                        string
+   GCPBootImage                     string
    ```
 
-3. **`test/e2e/util/options.go`** - Add `DefaultGCPOptions()` function (after `DefaultPowerVSOptions`):
+3. **`test/e2e/util/options.go`** - `DefaultGCPOptions()` function (line 446):
    ```go
    func (o *Options) DefaultGCPOptions() hypershiftgcp.RawCreateOptions {
        return hypershiftgcp.RawCreateOptions{
@@ -813,11 +873,21 @@ Add GCP-specific command-line flags to `test/e2e/e2e_test.go` and platform optio
            WorkloadIdentityProviderID:    o.ConfigurableClusterOptions.GCPWorkloadIdentityProviderID,
            NodePoolServiceAccount:        o.ConfigurableClusterOptions.GCPNodePoolServiceAccount,
            ControlPlaneServiceAccount:    o.ConfigurableClusterOptions.GCPControlPlaneServiceAccount,
+           CloudControllerServiceAccount: o.ConfigurableClusterOptions.GCPCloudControllerServiceAccount,
+           StorageServiceAccount:         o.ConfigurableClusterOptions.GCPStorageServiceAccount,
+           ImageRegistryServiceAccount:   o.ConfigurableClusterOptions.GCPImageRegistryServiceAccount,
+           ServiceAccountSigningKeyPath:  o.ConfigurableClusterOptions.GCPServiceAccountSigningKeyPath,
+           EndpointAccess:                o.ConfigurableClusterOptions.GCPEndpointAccess,
+           IssuerURL:                     o.ConfigurableClusterOptions.GCPIssuerURL,
+           MachineType:                   o.ConfigurableClusterOptions.GCPMachineType,
+           Zone:                          o.ConfigurableClusterOptions.GCPZone,
+           Subnet:                        o.ConfigurableClusterOptions.GCPSubnet,
+           BootImage:                     o.ConfigurableClusterOptions.GCPBootImage,
        }
    }
    ```
 
-4. **`test/e2e/util/hypershift_framework.go`** - Add to `PlatformAgnosticOptions` struct (around line 49):
+4. **`test/e2e/util/hypershift_framework.go`** - `PlatformAgnosticOptions` struct (line 44):
    ```go
    type PlatformAgnosticOptions struct {
        core.RawCreateOptions
@@ -828,44 +898,52 @@ Add GCP-specific command-line flags to `test/e2e/e2e_test.go` and platform optio
        AzurePlatform     azure.RawCreateOptions
        PowerVSPlatform   powervs.RawCreateOptions
        OpenStackPlatform openstack.RawCreateOptions
-       GCPPlatform       hypershiftgcp.RawCreateOptions  // ADD THIS
+       GCPPlatform       gcp.RawCreateOptions
 
        ExtOIDCConfig *ExtOIDCConfig
    }
    ```
 
-5. **`test/e2e/util/options.go`** - Update `DefaultClusterOptions()` (around line 204-217):
+5. **`test/e2e/util/options.go`** - `DefaultClusterOptions()` (line 208):
    ```go
    createOption := PlatformAgnosticOptions{
        // ... existing fields
-       GCPPlatform: o.DefaultGCPOptions(),  // ADD THIS
+       GCPPlatform: o.DefaultGCPOptions(),
    }
 
    switch o.Platform {
-   case hyperv1.AWSPlatform, hyperv1.AzurePlatform, hyperv1.NonePlatform, hyperv1.KubevirtPlatform, hyperv1.OpenStackPlatform:
-       createOption.Arch = hyperv1.ArchitectureAMD64
-   case hyperv1.GCPPlatform:  // ADD THIS CASE
+   case hyperv1.AWSPlatform, hyperv1.AzurePlatform, hyperv1.NonePlatform, hyperv1.KubevirtPlatform, hyperv1.OpenStackPlatform, hyperv1.GCPPlatform:
        createOption.Arch = hyperv1.ArchitectureAMD64
    case hyperv1.PowerVSPlatform:
        createOption.Arch = hyperv1.ArchitecturePPC64LE
    }
    ```
 
-6. **`test/e2e/e2e_test.go`** - Add GCP flags (after PowerVS flags, around line 160):
+6. **`test/e2e/e2e_test.go`** - GCP flags (line 167):
    ```go
-   // GCP specific flags
-   flag.StringVar(&globalOpts.ConfigurableClusterOptions.GCPProject, "e2e.gcp-project", "", "GCP project ID for testing")
-   flag.StringVar(&globalOpts.ConfigurableClusterOptions.GCPRegion, "e2e.gcp-region", "us-central1", "GCP region for clusters")
-   flag.StringVar(&globalOpts.ConfigurableClusterOptions.GCPNetwork, "e2e.gcp-network", "", "VPC network name")
+   // GCP Platform Flags
+   flag.StringVar(&globalOpts.ConfigurableClusterOptions.GCPProject, "e2e.gcp-project", "", "GCP project ID")
+   flag.StringVar(&globalOpts.ConfigurableClusterOptions.GCPRegion, "e2e.gcp-region", "us-central1", "GCP region")
+   flag.StringVar(&globalOpts.ConfigurableClusterOptions.GCPNetwork, "e2e.gcp-network", "", "GCP VPC network name")
    flag.StringVar(&globalOpts.ConfigurableClusterOptions.GCPPrivateServiceConnectSubnet, "e2e.gcp-psc-subnet", "", "Subnet for Private Service Connect endpoints")
-   flag.StringVar(&globalOpts.ConfigurableClusterOptions.GCPWorkloadIdentityProjectNumber, "e2e.gcp-wif-project-number", "", "Numeric GCP project ID for WIF")
+   flag.StringVar(&globalOpts.ConfigurableClusterOptions.GCPWorkloadIdentityProjectNumber, "e2e.gcp-wif-project-number", "", "GCP project number for Workload Identity")
    flag.StringVar(&globalOpts.ConfigurableClusterOptions.GCPWorkloadIdentityPoolID, "e2e.gcp-wif-pool-id", "", "Workload Identity Pool ID")
    flag.StringVar(&globalOpts.ConfigurableClusterOptions.GCPWorkloadIdentityProviderID, "e2e.gcp-wif-provider-id", "", "Workload Identity Provider ID")
    flag.StringVar(&globalOpts.ConfigurableClusterOptions.GCPNodePoolServiceAccount, "e2e.gcp-nodepool-sa", "", "Service Account for NodePool CAPG controllers")
    flag.StringVar(&globalOpts.ConfigurableClusterOptions.GCPControlPlaneServiceAccount, "e2e.gcp-controlplane-sa", "", "Service Account for Control Plane Operator")
+   flag.StringVar(&globalOpts.ConfigurableClusterOptions.GCPCloudControllerServiceAccount, "e2e.gcp-cloudcontroller-sa", "", "Service Account for Cloud Controller Manager")
+   flag.StringVar(&globalOpts.ConfigurableClusterOptions.GCPStorageServiceAccount, "e2e.gcp-storage-sa", "", "Service Account for GCP PD CSI Driver")
+   flag.StringVar(&globalOpts.ConfigurableClusterOptions.GCPImageRegistryServiceAccount, "e2e.gcp-imageregistry-sa", "", "Service Account for Image Registry Operator")
+   flag.StringVar(&globalOpts.ConfigurableClusterOptions.GCPServiceAccountSigningKeyPath, "e2e.gcp-sa-signing-key-path", "", "Path to the private key file for the GCP service account token issuer")
+   flag.StringVar(&globalOpts.ConfigurableClusterOptions.GCPEndpointAccess, "e2e.gcp-endpoint-access", string(hyperv1.GCPEndpointAccessPrivate), "GCP endpoint access type: Private or PublicAndPrivate")
+   flag.StringVar(&globalOpts.ConfigurableClusterOptions.GCPIssuerURL, "e2e.gcp-oidc-issuer-url", "", "The OIDC provider issuer URL for GCP")
+   flag.StringVar(&globalOpts.ConfigurableClusterOptions.GCPMachineType, "e2e.gcp-machine-type", "", "GCP machine type for node instances. Defaults to n2-standard-4")
+   flag.StringVar(&globalOpts.ConfigurableClusterOptions.GCPZone, "e2e.gcp-zone", "", "GCP zone for node instances. Defaults to {region}-a")
+   flag.StringVar(&globalOpts.ConfigurableClusterOptions.GCPSubnet, "e2e.gcp-subnet", "", "Subnet for node instances. Defaults to the PSC subnet value")
+   flag.StringVar(&globalOpts.ConfigurableClusterOptions.GCPBootImage, "e2e.gcp-boot-image", "", "GCP boot image for node instances. Overrides the default RHCOS image from the release payload")
    ```
 
-**Reference**: The GCP `RawCreateOptions` struct is defined in `cmd/cluster/gcp/create.go:31-58`
+**Reference**: The GCP `RawCreateOptions` struct is defined in `cmd/cluster/gcp/create.go:48-106`
 
 **Acceptance Criteria**:
 - [ ] GCP flags are recognized by test binary (`go test -v ./test/e2e/... -args -help | grep gcp`)
@@ -943,24 +1021,36 @@ Once basic tests and CI infrastructure are in place, integrate GCP tests into th
 **CI Operator Configuration** (`ci-operator/config/openshift/hypershift/openshift-hypershift-main.yaml`):
 
 > **Safe Introduction Strategy**: New tests should be introduced with `always_run: false` and optionally `skip_report: true`. This allows:
-> - Manual triggering via `/test e2e-gcp` command on PRs
+> - Manual triggering via `/test e2e-gke` command on PRs
 > - Failed jobs don't block PR merging during stabilization
 > - Rehearsible jobs can be used for initial testing in sandbox environment before merging
 
 ```yaml
 tests:
-  - as: e2e-gcp
-    # Safe introduction flags
-    always_run: false     # Only run when explicitly triggered with /test
-    optional: true        # Don't block PR on failure
-    skip_report: true     # Don't report results to PR (remove once stable)
-    run_if_changed: "^(api/hypershift/v1beta1/gcp.*|hypershift-operator/controllers/.*/gcp.*|control-plane-operator/controllers/.*/gcp.*|cmd/cluster/gcp/.*|cmd/nodepool/gcp/.*)"
-    steps:
-      cluster_profile: hypershift-gcp  # Dedicated GCP profile with own quota slice
-      workflow: hypershift-gcp-e2e
-      env:
-        GCP_REGION: us-central1
-        TECH_PREVIEW_NO_UPGRADE: "true"
+- always_run: false
+  as: e2e-gke
+  capabilities:
+  - build-tmpfs
+  optional: true
+  run_if_changed: ^(api/hypershift/v1beta1/gcp.*|hypershift-operator/controllers/.*/gcp.*|control-plane-operator/controllers/.*/gcp.*|cmd/cluster/gcp/.*|cmd/nodepool/gcp/.*)
+  steps:
+    cluster_profile: hypershift-gcp
+    env:
+      GKE_REGION: us-central1
+      GKE_RELEASE_CHANNEL: stable
+    workflow: hypershift-gcp-gke-e2e
+- always_run: false
+  as: e2e-v2-gke
+  capabilities:
+  - build-tmpfs
+  optional: true
+  run_if_changed: ^(api/hypershift/v1beta1/gcp.*|hypershift-operator/controllers/.*/gcp.*|control-plane-operator/controllers/.*/gcp.*|cmd/cluster/gcp/.*|cmd/nodepool/gcp/.*)
+  steps:
+    cluster_profile: hypershift-gcp
+    env:
+      GKE_REGION: us-central1
+      GKE_RELEASE_CHANNEL: stable
+    workflow: hypershift-gcp-gke-e2e-v2
 ```
 
 **Progression to Blocking**:
@@ -973,16 +1063,16 @@ tests:
 Before merging new test configurations, use `pj-rehearse` to test in a sandbox:
 ```bash
 # Rehearse the new job configuration
-/pj-rehearse pull-ci-openshift-hypershift-main-e2e-gcp
+/pj-rehearse pull-ci-openshift-hypershift-main-e2e-gke
 ```
 
 **Periodic Job** (for nightly/scheduled runs):
 ```yaml
-- as: e2e-gcp-periodic
+- as: e2e-gke-periodic
   cron: "0 4 * * *"  # Daily at 4 AM UTC
   steps:
-    cluster_profile: hypershift-gcp  # Dedicated GCP profile with own quota slice
-    workflow: hypershift-gcp-e2e
+    cluster_profile: hypershift-gcp
+    workflow: hypershift-gcp-gke-e2e
 ```
 
 **Tasks**:
@@ -995,7 +1085,7 @@ Before merging new test configurations, use `pj-rehearse` to test in a sandbox:
 - [ ] Add to relevant blocking job set once stable (after 1+ week of green runs)
 
 **Acceptance Criteria**:
-- [ ] Job can be manually triggered via `/test e2e-gcp`
+- [ ] Job can be manually triggered via `/test e2e-gke`
 - [ ] Rehearsal passes in sandbox environment
 - [ ] Test results visible in Prow/TestGrid (after removing skip_report)
 - [ ] Periodic jobs run successfully for 1 week before promoting to blocking
@@ -1160,7 +1250,7 @@ Boskos is a resource management server that apportions leases of resources to cl
 5. If heartbeats stop, Boskos forcibly reclaims the resource
 
 **Credential Management**:
-Credentials are NOT provided by Boskos directly. Instead, they are mounted from dedicated secrets via the step registry `credentials` configuration. For HyperShift Azure tests, this is `hypershift-ci-jobs-azurecreds`. For GCP, we need an equivalent `hypershift-ci-jobs-gcpcreds`.
+Credentials are NOT provided by Boskos directly. Instead, they are mounted from the cluster profile via `CLUSTER_PROFILE_DIR`. For GCP, the `hypershift-gcp` cluster profile provides `credentials.json`, `ci-folder-id`, and `billing-account-id`.
 
 **Example credential mount** (from `aks-provision-ref.yaml`):
 ```yaml
@@ -1222,7 +1312,7 @@ The trade-off is no guaranteed capacity per platform - a flood of AWS tests coul
 
 **Decision for GCP**: **Option A chosen** - Create dedicated `hypershift-gcp` profile with own quota slice.
 
-**Rationale**: GCP tests run on GKE management clusters (not the AWS-based hypershift-ci cluster), so having a separate profile avoids artificially limiting AWS cluster capacity. GCP tests are independent of AWS infrastructure.
+**Rationale**: GCP tests run on GKE control-plane clusters (not the AWS-based hypershift-ci cluster), so having a separate profile avoids artificially limiting AWS cluster capacity. GCP tests are independent of AWS infrastructure.
 
 **Options Considered**:
 
@@ -1330,19 +1420,19 @@ GCP E2E tests use a **dynamic two-project architecture** where projects are crea
 │   ├── GCP HCP Integration (1059025110045) ← Integration environment         │
 │   ├── GCP HCP Development (...)           ← Development environment         │
 │   │                                                                         │
-│   └── GCP HCP CI (new) ← CI folder for E2E tests (isolated from above)      │
+│   └── GCP HCP CI (614095012709) ← CI folder for E2E tests (isolated from above) │
 │       │                                                                     │
-│       ├── gcp-hcp-ci (CI Project - permanent, hosts the CI SA)              │
+│       ├── gcp-hcp-hypershift-ci (CI Project - permanent, hosts the CI SA)   │
 │       │   └── hypershift-ci@<ci-project>.iam.gserviceaccount.com            │
 │       │       (has projectCreator/projectDeleter ONLY on CI folder)         │
 │       │                                                                     │
 │       └── (Dynamic test projects - created/deleted per E2E run)             │
-│           ├── ${INFRA_ID}-mgmt (Management Project)                         │
-│           │   ├── GKE Autopilot Management Cluster                          │
+│           ├── ${INFRA_ID}-control-plane (Control Plane Project)             │
+│           │   ├── GKE Autopilot Control Plane Cluster                       │
 │           │   ├── HyperShift Operator                                       │
 │           │   └── OIDC Issuer                                               │
-│           └── ${INFRA_ID}-cust (Customer Project)                           │
-│               ├── WIF Pool (trusts MC OIDC)                                 │
+│           └── ${INFRA_ID}-hosted-cluster (Hosted Cluster Project)           │
+│               ├── WIF Pool (trusts CP OIDC)                                 │
 │               ├── Service Accounts (GSAs)                                   │
 │               ├── Hosted Cluster VMs                                        │
 │               └── VPCs, DNS, PSC                                            │
@@ -1368,6 +1458,8 @@ The Vault secret contains:
 | `credentials.json` | GCP service account key with project creation permissions |
 | `ci-folder-id` | GCP folder ID where dynamic projects are created |
 | `billing-account-id` | Billing account to link to new projects |
+| `ci-dns-zone-domain` | CI DNS zone domain (`hypershift-ci.gcp-hcp.openshiftapps.com`) |
+| `external-dns-sa-email` | ExternalDNS service account email for CI DNS management |
 
 **Required IAM Permissions for CI Service Account**:
 
@@ -1382,26 +1474,26 @@ The Vault secret contains:
 
 **Networking Approach**:
 
-- **Management cluster (GKE Autopilot)**: Custom VPC created per-test in management project
+- **Control Plane cluster (GKE Autopilot)**: Custom VPC created per-test in control-plane project
   - VPC with auto-mode subnets
   - Cloud Router + NAT (for private node egress)
   - PSC subnet (10.3.0.0/24, purpose=PRIVATE_SERVICE_CONNECT)
   - GKE Autopilot cluster (fully managed nodes, automatic scaling)
-- **Hosted cluster workers**: Dedicated VPC per-test via `hypershift create infra gcp` in customer project
+- **Hosted cluster workers**: Dedicated VPC per-test via `hypershift create infra gcp` in hosted-cluster project
 
 GKE Autopilot provides production-equivalent security settings by default (shielded nodes, hardened runtime, etc.) without manual configuration.
 
 **CI Flow** (see E2E Test Flow Diagram):
 
-1. **Create dynamic projects** → `${INFRA_ID}-mgmt` and `${INFRA_ID}-cust` under CI folder
-2. **Create VPC and networking** → VPC, Cloud Router, NAT, PSC subnet in management project
-3. **Provision GKE Autopilot** → Management cluster with production-equivalent settings
-4. **Install HyperShift operator** → Deploys operator with OIDC issuer
-5. **Run `hypershift create iam gcp --project-id=<customer-project>`** → Creates WIF pool, OIDC provider, GSAs
-6. **Run `hypershift create infra gcp --project-id=<customer-project>`** → Creates VPC, subnet, router, NAT, firewall
-7. **Run `hypershift create cluster gcp --project=<customer-project>`** → Creates hosted cluster using infra output
+1. **Create dynamic projects** → `${INFRA_ID}-control-plane` and `${INFRA_ID}-hosted-cluster` under CI folder
+2. **Create VPC and networking** → VPC, Cloud Router, NAT, PSC subnet in control-plane project
+3. **Provision GKE Autopilot** → Control Plane cluster with production-equivalent settings
+4. **Install prerequisites** → CRDs and cert-manager on GKE
+5. **Install HyperShift operator** → Deploys operator with OIDC issuer
+6. **Configure control plane** → GCP Workload Identity for PSC and ExternalDNS
+7. **Set up hosted cluster infra** → WIF and network infrastructure for hosted clusters
 8. **Run E2E tests** → Validate hosted cluster functionality
-9. **Cleanup** → Explicit resource deletion (GKE, VPC) followed by project deletion
+9. **Cleanup** → Delete hosted-cluster project, then GKE cluster, then control-plane project
 
 **Why Two Projects?**
 
@@ -1416,8 +1508,8 @@ This mirrors real-world deployments where:
 
 | Decision | Resolution |
 | -------- | ---------- |
-| Management Cluster Strategy | Provision per-test following AKS pattern |
-| Management Cluster Type | GKE Autopilot (fully managed nodes, automatic scaling, no node pool management) |
+| Control Plane Cluster Strategy | Provision per-test following AKS pattern |
+| Control Plane Cluster Type | GKE Autopilot (fully managed nodes, automatic scaling, no node pool management) |
 | Region Selection | us-central1 for initial CI |
 | Provisioning Method | Simple gcloud commands (not Terraform) |
 | Test Priority | Generic conformance first, then GCP-specific |
