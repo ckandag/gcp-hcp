@@ -142,6 +142,9 @@ func (c *CincinnatiClient) ResolveVersion(ctx context.Context, version, channelG
     // Extract major.minor from full version to derive the Cincinnati channel
     // e.g., version "4.22.0-ec.4" → "4.22", channelGroup "candidate" → channel "candidate-4.22"
     parts := strings.SplitN(version, ".", 3)
+    if len(parts) < 2 {
+        return "", fmt.Errorf("invalid version format: %s", version)
+    }
     channel := fmt.Sprintf("%s-%s.%s", channelGroup, parts[0], parts[1])
 
     // GET {baseURL}?channel={channel}&arch={arch}
