@@ -176,14 +176,14 @@ update := sdk.NewStatusUpdate(clusterID, "cls-version-resolution-controller", ge
 update.SetMetadata("release_image", resolvedImage)
 update.SetMetadata("release_version", resolvedVersion)
 update.SetMetadata("release_channel", channel)
-update.SetAppliedTrue("VersionResolved", fmt.Sprintf("Resolved %s to %s", minorVersion, resolvedVersion))
+update.SetAppliedTrue("VersionResolved", fmt.Sprintf("Resolved %s to %s", version, resolvedVersion))
 client.ReportStatus(update)
 ```
 
 If resolution fails (e.g., Cincinnati unavailable, empty channel):
 
 ```go
-update.SetAppliedFalse("ResolutionFailed", fmt.Sprintf("Failed to resolve version %s in channel %s: %v", minorVersion, channel, err))
+update.SetAppliedFalse("ResolutionFailed", fmt.Sprintf("Failed to resolve version %s in channel %s: %v", version, channel, err))
 client.ReportStatus(update)
 ```
 
