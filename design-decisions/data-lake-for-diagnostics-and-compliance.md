@@ -6,7 +6,7 @@
 
 ## Decision
 
-Use a two-tier GCP-native data lake architecture: BigQuery for streaming AI diagnostic findings (small volume, actively queried) and GCS for compliance audit logs (high volume, rarely queried) with BigQuery external tables for ad-hoc access. Two reusable Terraform child modules (`data-lake` and `data-lake-sink`) provide the infrastructure, deployed per region with sinks per source project.
+Use a two-tier GCP-native data lake architecture: BigQuery for streaming AI diagnostic findings (small volume, actively queried) and GCS for compliance audit logs (high volume, rarely queried) with BigQuery external tables for ad-hoc access. The diagnose-agent uses Google's managed BigQuery MCP server to query its own diagnostic history before investigating new alerts, creating a feedback loop that improves diagnosis quality over time. Two reusable Terraform child modules (`data-lake` and `data-lake-sink`) provide the infrastructure, deployed per region with sinks per source project.
 
 ## Context
 
@@ -103,7 +103,8 @@ Spike validation ([GCP-497](https://redhat.atlassian.net/browse/GCP-497)) confir
 - **Unified query surface**: BigQuery SQL for both data tiers — native tables for diagnostics, external tables for audit logs. Views flatten the Cloud Logging envelope schema for ease of use
 - **Compliance-ready**: GCS bucket with versioning, public access prevention, and configurable retention (default 365 days) meets ISO 27001 and SOC 2 audit log retention requirements. Destination project is configurable for future migration to a dedicated compliance project
 - **Reusable modules**: `data-lake` (dataset + bucket + external tables + views) and `data-lake-sink` (configurable sink supporting BigQuery or GCS destinations) follow the established child module pattern and can be composed flexibly
-- **AI enrichment path**: Diagnostic findings in BigQuery enable the diagnose-agent to query a cluster's prior history before producing new diagnoses — "has this happened before? what was the finding last time?"
+- **AI enrichment via MCP**: The diagnose-agent connects to Google's managed BigQuery MCP server to query a cluster's prior diagnostic history before investigating new alerts. This creates a feedback loop — the agent references prior root causes, detects recurring patterns, and escalates systemic issues instead of repeating point remediations. Validated end-to-end: agent queries history, finds prior PVC alerts, and incorporates that context into current etcd diagnosis.
+- **Extensible MCP pattern**: The MCP client bridge (`McpToolRegistry`) is generic — any MCP server can be registered with a prefix. Future integrations (Cloud Logging MCP, custom MCPs) follow the same pattern with no agent code changes.
 - **SRE investigation**: Per-cluster diagnostic timeline available via `view_recent_findings` with `WHERE cluster_id = '...'`
 - **No infrastructure to manage**: Cloud Logging handles sink routing, BigQuery handles query execution, GCS handles storage lifecycle — no ETL pipelines, no Dataflow, no custom code
 
@@ -129,6 +130,8 @@ Spike validation ([GCP-497](https://redhat.atlassian.net/browse/GCP-497)) confir
 * **Public access prevention**: GCS bucket enforces `public_access_prevention = "enforced"` and `uniform_bucket_level_access = true`.
 * **Bucket versioning**: Enabled for audit log immutability — prevents accidental overwrites or deletes.
 * **IAM least privilege**: Sink writer identities get only the minimum required role (BigQuery `dataEditor` or GCS `objectCreator`). Atlantis service account uses `bigquery.admin` (should be narrowed to `dataOwner` + `jobUser` for production).
+* **MCP security**: The MCP client uses Application Default Credentials with `bigquery.readonly` scope (read-only). Access tokens are cached with thread-safe refresh. Error messages are sanitized to strip project IDs and service account emails before returning to the model. The `DATA_LAKE_PROJECT_ID` env var is validated against GCP project ID format regex before prompt injection.
+* **SQL injection prevention**: Alert payload fields (cluster_id, namespace, region) are validated against strict format regexes (UUID, k8s namespace, GCP region) before the model constructs SQL queries. SQL metacharacters (`;`, `'`, `"`, `\`) are stripped.
 * **Future: Dedicated compliance project**: Production audit logs should eventually move to a dedicated GCP project with restricted IAM (security team access only), VPC Service Controls, and locked retention policies. The module's configurable destination project supports this migration path.
 
 ### Cost
@@ -166,6 +169,12 @@ Spike validation ([GCP-497](https://redhat.atlassian.net/browse/GCP-497)) confir
 Source Projects (Region, MC, Global)
     │
     ├── Cloud Run diagnose-agent
+    │       │
+    │       ├── Step 1: Query history via MCP ──→ BigQuery MCP Server
+    │       │     "Has this cluster had this alert before?"    │
+    │       │     ◄──── Prior findings ────────────────────────┘
+    │       │
+    │       ├── Steps 2-N: Investigate cluster via Cloud Workflows
     │       │
     │       └── Structured JSON (stdout) ──→ Cloud Logging
     │                                            │
@@ -224,6 +233,8 @@ Source Projects (Region, MC, Global)
 | Storage alerts | `google_monitoring_alert_policy` | Terraform (data-lake module) | BigQuery and GCS cost guardrails |
 | Log sink | `google_logging_project_sink` | Terraform (data-lake-sink module) | Routes logs to BigQuery or GCS |
 | Sink IAM | `google_bigquery_dataset_iam_member` / `google_storage_bucket_iam_member` | Terraform (data-lake-sink module) | Cross-project write access for sink identity |
+| MCP client bridge | `mcp_client.py` (Python) | Agent code | Connects agent to BigQuery MCP for history queries |
+| MCP cross-project IAM | `google_project_iam_member` | Terraform (MC region-iam.tf) | `bigquery.dataViewer`, `bigquery.jobUser`, `mcp.toolUser` for MC agent → region data lake |
 
 ## Spike Findings Summary
 
@@ -237,6 +248,10 @@ Source Projects (Region, MC, Global)
 | Cost at scale? | ~$281/month at 200 clusters (Policy Denied only). Would be ~$5,800 if sinking free logs |
 | External table schema? | Must be explicit (not autodetect) due to `@type` and `k8s.io/` field name characters |
 | Two-phase deployment? | Required — external tables gated by `enable_audit_external_tables` flag |
+| MCP BigQuery integration? | Google Managed MCP server works for cross-project queries. Requires `roles/mcp.toolUser`, `bigquery.dataViewer`, `bigquery.jobUser` on the data lake project |
+| Does the agent use history? | YES — agent queries prior findings as Step 1, references recurring patterns in diagnosis, and escalates systemic issues |
+| MCP endpoint URL? | `https://bigquery.googleapis.com/mcp` — project scope determined by auth credentials, not URL |
+| SQL injection risk? | Mitigated via UUID validation on cluster_id, namespace regex, SQL metacharacter stripping |
 
 ## Next Steps
 
@@ -246,8 +261,10 @@ Implementation will be split into the following PRs, each with a corresponding J
 2. **Data lake Terraform module** (`terraform/modules/data-lake/`): BigQuery dataset, GCS bucket, external tables, views, alerts
 3. **Data lake sink Terraform module** (`terraform/modules/data-lake-sink/`): Configurable sink with BigQuery and GCS support, filter validation
 4. **Region module integration**: Wire data-lake into region module, Atlantis IAM, variables, outputs
-5. **Dev-all-in-one integration**: Enable data lake in example config with diagnostic + audit sinks
-6. **Production hardening**: CMEK encryption, narrow Atlantis IAM, VPC Service Controls, dedicated compliance project evaluation
+5. **MC module integration**: Cross-project BigQuery/MCP IAM grants, `DATA_LAKE_PROJECT_ID` env var, `agent_image_override` variable
+6. **MCP BigQuery integration** (`agent/diagnose/mcp_client.py`): MCP-to-Gemini bridge, `gemini_schema.py` shared module, knowledge docs, investigation strategy updates
+7. **Dev-all-in-one integration**: Enable data lake in example config with diagnostic + audit sinks
+8. **Production hardening**: CMEK encryption, narrow Atlantis IAM, VPC Service Controls, dedicated compliance project evaluation
 
 ---
 
