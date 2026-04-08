@@ -10,16 +10,18 @@ All Prow CI jobs that access GCP resources must authenticate exclusively via Wor
 
 ## Context
 
-- **Problem Statement**: Prow CI jobs running on the `app.ci` ROSA cluster need to authenticate to GCP APIs (e.g., to create GKE clusters, manage Terraform state, push container images). The traditional approach uses static GCP service account JSON keys stored as Kubernetes secrets on the CI cluster. These keys are long-lived, difficult to rotate, and create a large blast radius if leaked — any holder of the key can impersonate the service account with no expiration.
+- **Problem Statement**: Prow CI jobs running on the OpenShift CI build farm need to authenticate to GCP APIs (e.g., to create GKE clusters, manage Terraform state, push container images). The traditional approach uses static GCP service account JSON keys stored as Kubernetes secrets on the CI cluster. These keys are long-lived, difficult to rotate, and create a large blast radius if leaked — any holder of the key can impersonate the service account with no expiration.
 - **Constraints**:
-  - The CI cluster is shared infrastructure (`app.ci`) managed by the TRT/DPTP team; we do not control its lifecycle or security posture
+  - CI jobs run on build farm clusters (build01-build11), not on app.ci directly. The dispatcher assigns jobs to clusters based on capabilities and load.
+  - These clusters are shared infrastructure managed by the TRT/DPTP team; we do not control their lifecycle or security posture
   - CI jobs run in ephemeral pods with projected service account tokens signed by the cluster's kube-apiserver
-  - The cluster's OIDC issuer (`https://ci-dv2np-oidc.s3.amazonaws.com`) is publicly accessible and serves JWKS for token verification
+  - WIF requires the cluster's OIDC issuer to be publicly accessible. AWS build clusters (build01, build03, build05-07, build09-11) have public OIDC endpoints (S3/CloudFront). GCP build clusters (build04, build08) use `kubernetes.default.svc` as issuer — WIF does NOT work from these clusters.
+  - Each cluster has a different OIDC issuer URL; one WIF provider per cluster is needed in the GCP Workload Identity Pool
   - GCP Workload Identity Federation supports OIDC providers natively
 - **Assumptions**:
-  - The `app.ci` cluster's OIDC issuer remains stable and publicly accessible
+  - Build cluster OIDC issuers remain stable and publicly accessible
   - GCP projects used by CI have IAM APIs enabled and can create Workload Identity Pools
-  - CI job pods can request projected tokens with custom audiences via `oc create token` or volume projection
+  - CI jobs requiring WIF are dispatched only to clusters with public OIDC (see dispatcher capability below)
 
 ## Alternatives Considered
 
@@ -30,7 +32,7 @@ All Prow CI jobs that access GCP resources must authenticate exclusively via Wor
 ## Decision Rationale
 
 * **Justification**: WIF eliminates static credentials entirely. Federated tokens are short-lived (~1h), scoped to a specific service account identity (`system:serviceaccount:<ns>:<sa>`), and cannot be used outside the token exchange flow. This dramatically reduces blast radius compared to JSON keys that grant indefinite access.
-* **Evidence**: We validated the full flow on `app.ci` — discovered the OIDC issuer, created a WIF pool/provider in `patmarti-1`, and successfully exchanged a projected SA token for a GCP federated access token. See [rosa-to-gcp-wif study](../studies/rosa-to-gcp-wif.md) for the complete walkthrough.
+* **Evidence**: We validated the full flow on `app.ci` — discovered the OIDC issuer, created a WIF pool/provider in `patmarti-1`, and successfully exchanged a projected SA token for a GCP federated access token. We also inventoried all 11 build clusters and confirmed 9 of them (all AWS) have public OIDC endpoints compatible with WIF. See [rosa-to-gcp-wif study](../studies/rosa-to-gcp-wif.md) for the complete walkthrough and inventory.
 * **Comparison**:
   - **Static JSON keys** are the simplest to set up but the weakest security posture. A leaked key grants permanent access until manually rotated. Keys stored on shared CI infrastructure are accessible to anyone with namespace access. Rotation requires coordinated secret updates across all consuming jobs.
   - **External token broker** adds operational complexity (a new service to build, deploy, and maintain) without clear benefit over native WIF, which is a first-party GCP capability requiring no custom infrastructure.
@@ -48,9 +50,10 @@ All Prow CI jobs that access GCP resources must authenticate exclusively via Wor
 
 ### Negative
 
-* Initial setup requires creating WIF pools/providers and IAM bindings per GCP project (one-time cost)
-* The WIF provider's `allowed-audiences` is set to the OIDC issuer URL, which matches the default projected token audience — no special configuration needed in CI job manifests
-* Dependency on the CI cluster's OIDC endpoint availability (S3 bucket) — if the OIDC endpoint is unreachable, GCP cannot verify tokens
+* Initial setup requires creating WIF pools/providers per build cluster and IAM bindings per GCP project (one-time cost). Each cluster has a different OIDC issuer, so the WIF pool needs one provider per cluster.
+* WIF only works from clusters with a public OIDC endpoint. Currently 9 of 11 build clusters qualify (all AWS). GCP build clusters (build04, build08) and vsphere02 have private issuers (`kubernetes.default.svc`) and cannot use WIF.
+* Jobs must be dispatched to WIF-capable clusters only. This requires a new dispatcher capability (e.g., `public-oidc`) in `core-services/sanitize-prow-jobs/_clusters.yaml` and the corresponding label on the jobs.
+* Dependency on the CI cluster's OIDC endpoint availability (S3 bucket / CloudFront) — if the OIDC endpoint is unreachable, GCP cannot verify tokens
 * Slightly more complex debugging: token exchange failures require understanding of OIDC/STS flow
 
 ## Cross-Cutting Concerns
@@ -72,3 +75,31 @@ All Prow CI jobs that access GCP resources must authenticate exclusively via Wor
 * Zero friction for CI job authors: the WIF provider accepts the default projected token audience (the OIDC issuer URL), so no special `--audience` flag is needed
 * WIF pool/provider setup is a one-time operation per GCP project; documented in the [rosa-to-gcp-wif study](../studies/rosa-to-gcp-wif.md)
 * Troubleshooting guide provided in the study doc covers common failure modes (audience mismatch, issuer mismatch, missing IAM bindings)
+
+## Implementation Requirements
+
+### Dispatcher capability
+
+Add a `public-oidc` capability to all build clusters that have a publicly accessible OIDC issuer. This is done by editing [`core-services/sanitize-prow-jobs/_clusters.yaml`](https://github.com/openshift/release/blob/main/core-services/sanitize-prow-jobs/_clusters.yaml) in openshift/release:
+
+```yaml
+# Add to each WIF-capable cluster's capabilities list:
+- public-oidc
+```
+
+Jobs requiring WIF declare the capability in their labels:
+
+```yaml
+labels:
+  capability/public-oidc: public-oidc
+```
+
+Currently eligible clusters: build01, build03, build05, build06, build07, build09, build10, build11. See the [build farm inventory](../studies/rosa-to-gcp-wif.md#build-farm-cluster-inventory) for details.
+
+### WIF pool with per-cluster providers
+
+A single GCP Workload Identity Pool should contain one OIDC provider per build cluster. IAM bindings are pool-scoped, so they apply regardless of which cluster the job runs on.
+
+### Making GCP build clusters WIF-compatible
+
+To enable WIF on the GCP build clusters (build04, build08), they would need to be reinstalled with `credentialsMode: Manual` and `ccoctl gcp create-all` to create a public OIDC bucket. This is a DPTP team decision and a significant cluster lifecycle change — it is not a prerequisite for this design decision, as 9 of 11 build clusters already support WIF.

@@ -2,7 +2,9 @@
 
 ## TL;DR
 
-Any OpenShift or ROSA cluster publishes an OIDC discovery document with public keys for verifying service account tokens. GCP Workload Identity Federation can trust this OIDC issuer, allowing pods on the cluster to authenticate to GCP without static credentials.
+OpenShift clusters with `credentialsMode: Manual` (STS) publish their OIDC discovery document and JWKS at a public URL (S3 bucket or CloudFront). GCP Workload Identity Federation can trust this OIDC issuer, allowing pods on the cluster to authenticate to GCP without static credentials.
+
+**Important**: Not all clusters have a public OIDC endpoint. Clusters installed without STS (e.g., GCP-hosted build clusters) use `kubernetes.default.svc` as issuer, which is not publicly accessible. WIF only works from clusters with a publicly reachable OIDC issuer. See the [build farm inventory](#build-farm-cluster-inventory) for details.
 
 **Setup in 3 steps:**
 
@@ -50,16 +52,17 @@ Workload Identity Federation (WIF) eliminates static credentials by letting GCP 
 
 ### OIDC on OpenShift/ROSA
 
-Every OpenShift cluster (including ROSA with STS) has an OIDC provider that backs Kubernetes service account tokens:
+Every OpenShift cluster has a kube-apiserver that signs projected service account tokens with a private key. The corresponding public key is published via JWKS. However, **where** the OIDC discovery document and JWKS are hosted depends on how the cluster was installed:
 
-- **ROSA/STS clusters**: The OIDC discovery document and JWKS (public keys) are hosted in a public S3 bucket. The bucket name is derived from the cluster's infrastructure ID.
-- **Self-managed clusters**: The OIDC endpoint may be hosted differently (e.g., on the API server itself or a custom endpoint).
+- **Clusters with `credentialsMode: Manual` (STS/WIF)**: The OIDC discovery document and JWKS are hosted at a **public URL** — typically an S3 bucket (e.g. `<cluster>-oidc.s3.<region>.amazonaws.com`) or CloudFront distribution. This is set up by `ccoctl` during installation. **WIF works from these clusters.**
+- **ROSA/STS clusters**: Same as above — ROSA with STS automatically creates a public S3 OIDC bucket.
+- **Clusters without STS** (e.g., GCP-hosted OCP, vSphere): The issuer defaults to `https://kubernetes.default.svc`, which is an internal-only address. **WIF does NOT work from these clusters** because GCP cannot reach the OIDC endpoint to verify token signatures.
 
-The kube-apiserver signs projected service account tokens with a private key. The corresponding public key is published in the JWKS endpoint, allowing external parties (like GCP) to verify token signatures without accessing the private key.
+The OIDC issuer URL is baked into the cluster at install time and cannot be changed post-install without reinstalling.
 
 ### Token flow
 
-```
+```text
 OpenShift Cluster                          GCP
 ┌─────────────────────┐                    ┌──────────────────────┐
 │ Pod with SA token    │                    │ Workload Identity    │
@@ -179,7 +182,7 @@ gcloud iam service-accounts add-iam-policy-binding <GCP_SA>@<PROJECT>.iam.gservi
   --member="principal://iam.googleapis.com/projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/<POOL>/subject/system:serviceaccount:<NAMESPACE>:<SA_NAME>"
 ```
 
-**Option B: Direct resource access (principalSet for broader matching)**
+**Option B: Direct resource access**
 
 ```bash
 gcloud projects add-iam-policy-binding <GCP_PROJECT> \
@@ -206,7 +209,7 @@ Expected claims:
 
 ```json
 {
-    "aud": ["openshift"],
+    "aud": ["https://<issuer-url>"],
     "iss": "https://<issuer-url>",
     "sub": "system:serviceaccount:<namespace>:<sa-name>",
     "kubernetes.io": {
@@ -252,6 +255,74 @@ A successful response looks like:
 | `INVALID_ISSUER` | Issuer URL in the token doesn't match `--issuer-uri` on the provider |
 | `INVALID_SIGNATURE` | GCP can't fetch or verify JWKS from the issuer URL (bucket not public?) |
 | STS returns token but GCP API calls fail with 403 | Federated identity has no IAM bindings — identity is proven but not authorized |
+
+## Build Farm Cluster Inventory
+
+The OpenShift CI build farm consists of multiple clusters across AWS, GCP, and vSphere. WIF requires a publicly accessible OIDC issuer — only clusters installed with STS/Manual credentials mode have one.
+
+The OIDC issuer URL is not stored in any config repository. It can be discovered at runtime by querying each cluster's API server:
+
+```bash
+curl -sk https://<api-url>/.well-known/openid-configuration | python3 -c "import sys,json; print(json.load(sys.stdin)['issuer'])"
+```
+
+### Inventory (as of 2026-04-08)
+
+| Cluster | Provider | API URL | OIDC Issuer | Public | WIF |
+|---------|----------|---------|-------------|--------|-----|
+| app.ci | ROSA | `api.ci.l2s4.p1.openshiftapps.com` | `https://ci-dv2np-oidc.s3.amazonaws.com` | Yes | Yes |
+| build01 | AWS | `api.build01.ci.devcluster.openshift.com` | `https://build01-oidc.s3.us-east-1.amazonaws.com` | Yes | Yes |
+| build02 | GCP | `api.build02.gcp.ci.openshift.org` | `https://kubernetes.default.svc` | No | **No** |
+| build03 | AWS | `api.build03.ci.devcluster.openshift.com` | `https://d3fwbo89i814ul.cloudfront.net` | Yes | Yes |
+| build04 | GCP | `api.build04.gcp.ci.openshift.org` | `https://kubernetes.default.svc` | No | **No** |
+| build05 | AWS | `api.build05.ci.devcluster.openshift.com` | `https://dj45gf85bjih9.cloudfront.net` | Yes | Yes |
+| build06 | AWS | `api.build06.ci.devcluster.openshift.com` | `https://ccoctl-build06-oidc.s3.us-east-1.amazonaws.com` | Yes | Yes |
+| build07 | AWS | `api.build07.ci.devcluster.openshift.com` | `https://ccoctl-build07-oidc.s3.us-east-1.amazonaws.com` | Yes | Yes |
+| build08 | GCP | `api.build08.gcp.ci.openshift.org` | `https://kubernetes.default.svc` | No | **No** |
+| build09 | AWS | `api.build09.ci.devcluster.openshift.com` | `https://d3ocow90ke8648.cloudfront.net` | Yes | Yes |
+| build10 | AWS | `api.build10.ci.devcluster.openshift.com` | `https://d31jkmksv2w6vu.cloudfront.net` | Yes | Yes |
+| build11 | AWS | `api.build11.ci.devcluster.openshift.com` | `https://ccoctl-build11-oidc.s3.us-east-2.amazonaws.com` | Yes | Yes |
+| vsphere02 | vSphere | `api.build02.vmc.ci.openshift.org` | `https://kubernetes.default.svc` | No | **No** |
+
+**Summary**: 9 of 11 active build clusters (all AWS) have public OIDC endpoints. The 3 GCP/vSphere clusters (build02/blocked, build04, build08) do not — they would need to be reinstalled with `credentialsMode: Manual` and `ccoctl` to get public OIDC.
+
+### OIDC naming patterns
+
+The public OIDC issuer URL varies across clusters due to different `ccoctl` versions and installation methods:
+
+- `<cluster>-oidc.s3.<region>.amazonaws.com` (build01)
+- `ccoctl-<cluster>-oidc.s3.<region>.amazonaws.com` (build06, build07, build11)
+- CloudFront distributions with random IDs (build03, build05, build09, build10)
+- ROSA-generated bucket names (app.ci: `ci-dv2np-oidc`)
+
+This means the OIDC issuer cannot be predicted from the cluster name — it must be discovered from the cluster itself.
+
+### Dispatcher and capabilities
+
+Jobs are dispatched to build clusters by the [prow-job-dispatcher](https://github.com/openshift/ci-tools/tree/main/cmd/prow-job-dispatcher) based on capabilities defined in [`core-services/sanitize-prow-jobs/_clusters.yaml`](https://github.com/openshift/release/blob/main/core-services/sanitize-prow-jobs/_clusters.yaml).
+
+To ensure WIF-dependent jobs only run on clusters with a public OIDC endpoint, a new capability (e.g., `public-oidc`) could be added to eligible clusters in `_clusters.yaml`. Jobs requiring WIF would then declare `capability/public-oidc: public-oidc` in their labels, and the dispatcher would only assign them to matching clusters.
+
+**Current limitation**: The dispatcher supports AND-matching of capabilities but does **not** support negation (e.g., "NOT gcp"). Adding a positive `public-oidc` capability to WIF-compatible clusters is the cleanest approach.
+
+### Multi-cluster WIF setup
+
+Since each cluster has a different OIDC issuer, the GCP-side WIF configuration needs one OIDC provider per cluster in the Workload Identity Pool. The pool can be shared, but each provider trusts a specific issuer:
+
+```bash
+# One pool for all CI clusters
+gcloud iam workload-identity-pools create prowci --project=<PROJECT> --location=global
+
+# One provider per cluster
+for each WIF-capable cluster:
+  gcloud iam workload-identity-pools providers create-oidc <cluster>-oidc \
+    --workload-identity-pool=prowci \
+    --issuer-uri="<cluster-specific-issuer-url>" \
+    --allowed-audiences="<cluster-specific-issuer-url>" \
+    --attribute-mapping="google.subject=assertion.sub"
+```
+
+IAM bindings use `principal://...subject/system:serviceaccount:<ns>:<sa>` and apply across all providers in the pool — so a single IAM binding grants access regardless of which cluster the job runs on.
 
 ## Concrete Example: app.ci ROSA Cluster
 
