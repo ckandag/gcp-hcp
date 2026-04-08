@@ -181,7 +181,12 @@ Spike validation ([GCP-497](https://redhat.atlassian.net/browse/GCP-497)) confir
 ### Operability
 
 * **Deployment model**: `data-lake` module deploys the BigQuery dataset, GCS bucket, external tables, views, and alerts. `data-lake-sink` module deploys per-project sinks for diagnostic findings (streaming to BigQuery). Audit log routing uses a folder-level aggregated sink (single Terraform resource).
-* **Two-phase for external tables**: Initial deploy creates bucket and sinks. After audit data arrives (up to 3 hours), set `enable_audit_external_tables = true` and re-apply.
+* **One-time two-phase setup for external tables**: The initial data lake deployment requires two applies:
+  1. **First apply**: Creates the GCS bucket, folder sink, BigQuery dataset, and views. External tables are disabled (`enable_audit_external_tables = false`).
+  2. **Wait ~1 hour** for the folder sink to deliver its first batch of audit logs to GCS.
+  3. **Second apply**: Enable external tables (`enable_audit_external_tables = true`). BigQuery autodetect infers the schema from the delivered data.
+
+  This is a **one-time operation per environment** (e.g., once for dev, once for production). After the data lake is established, adding new projects requires zero configuration — the folder sink's `include_children = true` automatically captures audit logs from any new project added under the folder. No additional Terraform changes, sinks, or external table updates are needed.
 * **BigQuery views**: Four pre-built views (`view_recent_findings`, `view_findings_by_cluster`, `view_repeat_offenders`, `view_daily_summary`) provide immediate value without SQL knowledge.
 * **Notebook templates**: Jupyter notebooks for diagnostic findings analysis and audit log investigation are provided for local use (VS Code) with BigQuery Python client.
 
