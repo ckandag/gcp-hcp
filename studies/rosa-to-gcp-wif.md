@@ -301,9 +301,16 @@ This means the OIDC issuer cannot be predicted from the cluster name — it must
 
 Jobs are dispatched to build clusters by the [prow-job-dispatcher](https://github.com/openshift/ci-tools/tree/main/cmd/prow-job-dispatcher) based on capabilities defined in [`core-services/sanitize-prow-jobs/_clusters.yaml`](https://github.com/openshift/release/blob/main/core-services/sanitize-prow-jobs/_clusters.yaml).
 
-To ensure WIF-dependent jobs only run on clusters with a public OIDC endpoint, a new capability (e.g., `public-oidc`) could be added to eligible clusters in `_clusters.yaml`. Jobs requiring WIF would then declare `capability/public-oidc: public-oidc` in their labels, and the dispatcher would only assign them to matching clusters.
+To ensure WIF-dependent jobs only run on clusters with a public OIDC endpoint, we use the existing `intranet` capability as a temporary workaround. This capability is only assigned to AWS clusters, which all have public OIDC issuers. Jobs requiring WIF declare it in their labels:
 
-**Current limitation**: The dispatcher supports AND-matching of capabilities but does **not** support negation (e.g., "NOT gcp"). Adding a positive `public-oidc` capability to WIF-compatible clusters is the cleanest approach.
+```yaml
+labels:
+  capability/intranet: intranet
+```
+
+Per [DPTP team feedback](https://redhat-internal.slack.com/archives/CBN38N3MW/p1775592706242139), adding a new semantic capability (e.g., `public-oidc`) was rejected to avoid bloating the capability list. The `intranet` workaround is temporary — once the GCP build clusters are migrated to STS ([DPTP-4758](https://redhat.atlassian.net/browse/DPTP-4758)), WIF will work across all clusters and the capability constraint can be removed.
+
+**Note**: The dispatcher supports AND-matching of capabilities but does **not** support negation (e.g., "NOT gcp").
 
 ### Multi-cluster WIF setup
 
