@@ -31,9 +31,27 @@ GCP generates four types of audit logs. Understanding their volume, cost, and re
 | **Admin Activity** | Any API call that **modifies** a resource | Creating a GKE cluster, changing IAM policy, deploying a workload, `kubectl create/apply/delete` | Low (5-50 MB/day/cluster) | Yes | 400 days in `_Required` bucket |
 | **System Event** | **Google-initiated** changes (not user actions) | GKE auto-repair replacing a node, autoscaler scaling, VM live migration | Very low (1-5 MB/day/cluster) | Yes | 400 days in `_Required` bucket |
 | **Policy Denied** | Any API call **rejected** by IAM or org policy | Service account denied access, VPC Service Controls blocked, org policy violation | Low-Medium (spiky) | No | 30 days in `_Default` bucket |
-| **Data Access** | Any API call that **reads** data (get, list, watch) | `kubectl get pods`, reading a secret, querying BigQuery | **Very high** (10-200 GB/day/cluster) | No ($0.50/GiB) | 30 days in `_Default` bucket |
+| **Data Access** | Any API call that **reads** data (get, list, watch) | `kubectl get pods`, reading a secret, querying BigQuery | **Very high** (~1.3 KB/request, scales linearly with API traffic — ~5,000 req/min ≈ 10 GB/day) | No ($0.50/GiB) | 30 days in `_Default` bucket |
 
-**Key insight**: Admin Activity and System Event logs are free with 400-day retention per project, but they are only queryable per-project via `gcloud logging read`. A folder-level aggregated sink to a centralized Cloud Logging log bucket with Log Analytics enabled makes them centrally queryable via standard BigQuery SQL. Log Analytics handles the complex audit log schema internally (including fields like `@type` that are invalid in BigQuery column names), eliminating the need for external tables or manual schema management.
+**Note on volume estimates**: The per-cluster volumes above are for individual GKE clusters. In practice, audit log volume scales per-project (not per-cluster), and multiple hosted clusters share each MC project. At production scale (~180 projects), the aggregate volume is lower than cluster count × per-cluster estimate would suggest.
+
+**Key insight**: Admin Activity and System Event logs are free with 400-day retention per project, but they are only queryable per-project via `gcloud logging read`. A folder-level aggregated sink to a centralized Cloud Logging log bucket with Log Analytics enabled makes them centrally queryable via standard BigQuery SQL. While BigQuery can technically handle fields like `@type` using backtick-quoted identifiers, Log Analytics eliminates the need to manage schemas and query syntax workarounds entirely — providing a cleaner query experience with zero operational overhead.
+
+### Data Location
+
+The data lake is deployed in a **single region** (e.g., `us-central1`). This applies to both the BigQuery dataset and the Cloud Logging log bucket.
+
+| Location Option | Resilience | CMEK Support | Notes |
+|----------------|------------|-------------|-------|
+| **Regional** (e.g., `us-central1`) | Single region | Yes | Recommended — predictable, supports CMEK |
+| **Global** (log bucket) | **No** added resilience vs regional | **No** | Not recommended — same as regional but loses CMEK |
+| **Multi-region** (BigQuery `US`) | **No** cross-region redundancy | Yes | Google picks a region within US — no replication |
+
+**Why not global?** A `global` Cloud Logging log bucket stores data in a single Google-chosen region with no cross-region replication — identical resilience to a regional bucket, but without CMEK support. There is no cost difference.
+
+**Cross-region queryability is not affected by data location.** BigQuery SQL queries can run from any region against a regional dataset. Data location controls where data is stored, not who can query it.
+
+**Future: Cross-region replication.** If resilience requirements emerge, BigQuery supports cross-region replication as a separate feature. This can be added without re-architecting the data lake.
 
 ### What We Capture vs What Stays In-Project
 
@@ -86,7 +104,7 @@ The two-tier approach optimizes for the different access patterns and cost profi
 
 - **Folder-level aggregated sinks** capture audit logs from all projects under a folder with a single sink definition. New projects are automatically included — no per-project configuration required. The sink creates a copy; original logs remain in each project for Logs Explorer access.
 
-- **Log Analytics** was initially rejected but reconsidered after evaluating the alternative (GCS + BigQuery external tables). External tables require explicit schema management and cannot handle Cloud Audit Log fields with characters invalid in BigQuery column names (`@type`, `authorization.k8s.io/`). Log Analytics handles these internally, providing a clean query surface with zero schema maintenance. The cost difference (~$1,020/yr vs ~$300/yr at production scale) is justified by the elimination of operational complexity.
+- **Log Analytics** was initially rejected but reconsidered after evaluating the alternative (GCS + BigQuery external tables). External tables require explicit schema management, and Cloud Audit Log fields like `@type` and `authorization.k8s.io/` require backtick-quoting in every query. While technically functional, this adds ongoing query complexity and schema maintenance burden. Log Analytics handles these transparently, providing a clean query surface with zero schema maintenance. The cost premium is justified by the elimination of operational complexity.
 
 ### Evidence
 
@@ -96,8 +114,8 @@ Spike validation ([GCP-497](https://redhat.atlassian.net/browse/GCP-497)) confir
 - Diagnostic findings arrive in BigQuery within 1-2 minutes of the agent emitting them
 - BigQuery views provide a clean query surface that flattens `jsonPayload.*` fields — users query `SELECT * FROM view_recent_findings` without needing to know the Cloud Logging envelope schema
 - Folder-level aggregated sink captures Admin Activity, System Event, and Policy Denied from all projects under a folder with a single sink definition — cross-project audit logs queryable via standard SQL immediately
-- Log Analytics linked dataset handles complex audit log schema including `@type` fields — no schema management required (GCS external tables were rejected due to this issue)
-- GCS external tables were initially implemented but failed due to `@type` field name conflicts in Cloud Audit Logs — this drove the switch to Log Analytics
+- Log Analytics linked dataset handles complex audit log schema transparently — no backtick-quoting for `@type` fields, no schema management
+- GCS external tables were initially implemented but rejected due to schema management burden and query complexity with special-character field names — Log Analytics eliminates both
 - MCP BigQuery integration validated: diagnose-agent queries diagnostic history before investigating alerts, references prior findings in diagnosis
 - Pydantic schema validation (`DiagnosticFinding` model) ensures type consistency before the first write to BigQuery, preventing silent schema-on-first-write errors
 
@@ -109,7 +127,7 @@ Spike validation ([GCP-497](https://redhat.atlassian.net/browse/GCP-497)) confir
 - At 200 clusters: ~$5,800/month (BigQuery) vs ~$281/month (GCS with lifecycle)
 
 **Alternative 3 (GCS + external tables)** was initially implemented but rejected because:
-- Cloud Audit Logs contain `@type` fields that are invalid in BigQuery column names — external tables cannot handle them with autodetect or explicit schemas
+- Cloud Audit Logs contain `@type` fields that require backtick-quoting in BigQuery — external tables with autodetect fail, and explicit schemas require workarounds for every query
 - Workaround (flat schema with `JSON_VALUE()` queries) adds ongoing complexity and non-standard query patterns
 - Two-phase deployment required (create bucket → wait for data → create external tables)
 - Cost savings (~$720/yr at production scale) did not justify the operational burden
@@ -167,12 +185,14 @@ Spike validation ([GCP-497](https://redhat.atlassian.net/browse/GCP-497)) confir
 | BigQuery streaming (operational data) | $0.02 | $0.30 |
 | BigQuery storage (operational data) | $0.02 | $0.36 |
 | BigQuery queries (on-demand) | FREE (<1 TB) | FREE (<1 TB) |
-| Log Analytics ingestion (audit logs) | $3 | $85 |
-| **Total** | **~$3** | **~$85/mo (~$1,020/yr)** |
+| Log Analytics ingestion (audit logs) | $3 | $85-225 |
+| **Total** | **~$3** | **~$85-225/mo (~$1,020-2,700/yr)** |
+
+**Audit log volume estimate**: ~180 projects × ~32 MB/day average (Admin Activity + System Event + Policy Denied) = ~170 GiB/month at the low end. Actual volume depends on API activity — projects with many hosted clusters or active deployments will be higher. Range shown reflects low-to-high per-project estimates.
 
 **Key cost decisions:**
 - Folder-level aggregated sink captures all three audit log types (Admin Activity, System Event, Policy Denied) in one centralized log bucket with Log Analytics enabled.
-- Log Analytics ingestion costs $0.50/GiB but eliminates GCS storage costs, external table management, and schema maintenance. At production scale (~170 GiB/month audit data), this is ~$85/month — justified by operational simplicity.
+- Log Analytics ingestion costs $0.50/GiB but eliminates GCS storage costs, external table management, and schema maintenance — justified by operational simplicity.
 - Data Access logs are NOT captured — too high volume ($0.50/GiB ingestion, 10-200 GB/day/cluster). Enable selectively if needed.
 - BigQuery storage alert provides bill shock protection for streaming data.
 - Filter validation on the sink module prevents accidental empty-filter cost explosion.
@@ -181,10 +201,10 @@ Spike validation ([GCP-497](https://redhat.atlassian.net/browse/GCP-497)) confir
 
 | Approach | Annual Cost (production) | Schema Maintenance | Setup Complexity |
 |----------|-------------------------|-------------------|-----------------|
-| GCS + External Tables | ~$300/yr | High (manual JSON schema, `@type` workarounds) | Two-phase deployment |
-| Log Analytics | ~$1,020/yr | None (handled by Google) | Single deployment |
+| GCS + External Tables | ~$300-700/yr | High (manual JSON schema, quoted-identifier workarounds) | Two-phase deployment |
+| Log Analytics | ~$1,020-2,700/yr | None (handled by Google) | Single deployment |
 
-The ~$720/yr premium eliminates ongoing operational burden.
+The premium eliminates ongoing schema management, query syntax workarounds, and two-phase deployment complexity.
 
 ### Operability
 
@@ -265,12 +285,34 @@ Folder (contains all region + MC projects)
 |----------|---------|
 | Native tables vs external tables vs Log Analytics? | Native BigQuery for real-time operational data (streaming). Log Analytics for audit logs (eliminates schema issues, no external tables needed) |
 | Per-project vs folder-level audit sinks? | Folder-level aggregated sink — one sink captures all projects, auto-includes new ones |
-| GCS vs Log Analytics for audit logs? | Log Analytics chosen. GCS external tables failed due to `@type` field name conflicts. Log Analytics handles this internally. Cost premium (~$720/yr) justified by zero schema maintenance |
+| GCS vs Log Analytics for audit logs? | Log Analytics chosen. GCS external tables require backtick-quoting for `@type` fields and manual schema management. Log Analytics handles this transparently. Cost premium justified by zero operational overhead |
 | Schema-on-first-write risk? | Mitigated by Pydantic schema validation in agent code. Schema version field tracks evolution |
-| Cost at scale? | ~$85/month at production scale (~2,500 clusters). Would be ~$5,800 if using BigQuery streaming for audit logs |
+| Cost at scale? | ~$85-225/month at production scale (~180 projects). Would be ~$5,800 if using BigQuery streaming for audit logs |
 | MCP BigQuery integration? | Google Managed MCP server works for cross-project queries. Requires `roles/mcp.toolUser`, `bigquery.dataViewer`, `bigquery.jobUser` on the data lake project |
 | Does the agent use history? | YES — agent queries prior findings as Step 1, references recurring patterns in diagnosis, and escalates systemic issues |
 | SQL injection risk? | Mitigated via UUID validation on cluster_id, namespace regex, SQL metacharacter stripping |
+
+## Table Naming
+
+BigQuery tables created by Cloud Logging sinks are auto-named after the log source (e.g., `run_googleapis_com_stdout` for Cloud Run stdout). For production clarity, each data source should use a custom Cloud Logging log name to produce a meaningful table name:
+
+| Data Source | Log Name | BigQuery Table | Status |
+|------------|----------|---------------|--------|
+| Diagnose agent findings | `diagnostic_findings` | `diagnostic_findings` | Planned — use Cloud Run custom log name |
+| E2E test results | `e2e_test_results` | `e2e_test_results` | Future |
+| ArgoCD promotion state | `argocd_promotions` | `argocd_promotions` | Future |
+
+BigQuery views (e.g., `view_recent_findings`) provide a clean query surface on top of these tables regardless of the underlying table name.
+
+## Future Data Sources
+
+The data lake architecture is designed to support additional streaming data sources beyond the initial diagnostic findings. Potential future tenants include:
+
+- **ArgoCD application state**: Version, target revision, image overrides, and promotion status for each application — enabling promotion tracking and rollback analysis
+- **E2E promotion test results**: Pass/fail results from environment-targeted promotion tests, enabling confidence scoring before promoting to the next environment
+- **Cluster lifecycle events**: Creation, deletion, scaling, and upgrade events for fleet-wide tracking
+
+Each new data source follows the same pattern: emit structured JSON with a custom log name → Cloud Logging sink → BigQuery table → views for querying.
 
 ---
 
