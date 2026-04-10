@@ -1,0 +1,6 @@
+dependencies:
+- name: hyperfleet-adapter
+  repository: git+https://github.com/openshift-hyperfleet/hyperfleet-adapter@charts?ref=v0.2.0
+  version: 2.0.0
+digest: sha256:e16f2e770b0de3642c5316e1abeab61bd56ba6004f2fdc7bceb7e27f3f8e08f7
+generated: "2026-04-10T16:07:11.950348-05:00"
