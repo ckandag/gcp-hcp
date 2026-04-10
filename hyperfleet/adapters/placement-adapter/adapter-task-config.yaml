@@ -12,268 +12,272 @@
 # Flow:
 #   Event N (no placement yet) → Job created → report status
 #   Event N+1 (placement exists) → gate closed → ack, no-op
-apiVersion: hyperfleet.redhat.com/v1alpha1
-kind: AdapterTaskConfig
-metadata:
-  name: adapter-placement-job
-  labels:
-    hyperfleet.io/adapter-type: kubernetes
-    hyperfleet.io/component: adapter
-spec:
-  # ============================================================================
-  # Phase 1: Parameter extraction
-  # ============================================================================
-  params:
-    - name: "clusterId"
-      source: "event.id"
-      type: "string"
-      required: true
 
-    - name: "generation"
-      source: "event.generation"
-      type: "int"
-      required: true
+# ============================================================================
+# Phase 1: Parameter extraction
+# ============================================================================
+params:
+  - name: "clusterId"
+    source: "event.id"
+    type: "string"
+    required: true
 
-    - name: "namespace"
-      source: "env.NAMESPACE"
-      type: "string"
-      required: true
+  - name: "generation"
+    source: "event.generation"
+    type: "int"
+    required: true
 
-    - name: "serviceAccountName"
-      source: "env.SERVICE_ACCOUNT"
-      type: "string"
-      required: true
+  - name: "namespace"
+    source: "env.NAMESPACE"
+    type: "string"
+    required: true
 
-    - name: "gcpProjectId"
-      source: "env.GCP_PROJECT_ID"
-      type: "string"
-      required: true
-      description: "Regional GCP project ID for Secret Manager lookups"
+  - name: "serviceAccountName"
+    source: "env.SERVICE_ACCOUNT"
+    type: "string"
+    required: true
 
-    - name: "maestroUrl"
-      source: "env.MAESTRO_URL"
-      type: "string"
-      default: "http://maestro.hyperfleet.svc.cluster.local:8000"
+  - name: "gcpProjectId"
+    source: "env.GCP_PROJECT_ID"
+    type: "string"
+    required: true
+    description: "Regional GCP project ID for Secret Manager lookups"
 
-    - name: "hyperfleetApiUrl"
-      source: "env.HYPERFLEET_API_URL"
-      type: "string"
-      default: "http://hyperfleet-api.hyperfleet.svc.cluster.local:8000"
+  - name: "maestroUrl"
+    source: "env.MAESTRO_URL"
+    type: "string"
+    default: "http://maestro.hyperfleet.svc.cluster.local:8000"
 
-    - name: "placementImage"
-      source: "env.PLACEMENT_IMAGE"
-      type: "string"
-      default: "google/cloud-sdk:slim"
+  - name: "hyperfleetApiUrl"
+    source: "env.HYPERFLEET_API_URL"
+    type: "string"
+    default: "http://hyperfleet-api.hyperfleet.svc.cluster.local:8000"
 
-  # ============================================================================
-  # Phase 2: Preconditions
-  #
-  # 1. Fetch cluster from HyperFleet API
-  # 2. Check if placement already decided — gate closes, adapter acks and
-  #    does nothing (no status re-post, no Job creation)
-  # ============================================================================
-  preconditions:
-    - name: "clusterDetails"
-      apiCall:
-        method: "GET"
-        url: "/clusters/{{ .clusterId }}"
-        timeout: 10s
-        retryAttempts: 3
-        retryBackoff: "exponential"
-      capture:
-        - name: "clusterName"
-          field: "name"
-        - name: "generation"
-          field: "generation"
+  - name: "placementImage"
+    source: "env.PLACEMENT_IMAGE"
+    type: "string"
+    default: "google/cloud-sdk:slim"
 
-    - name: "adapterStatuses"
-      apiCall:
-        method: "GET"
+# ============================================================================
+# Phase 2: Preconditions
+#
+# 1. Fetch cluster from HyperFleet API
+# 2. Check if placement already decided — gate closes, adapter acks and
+#    does nothing (no status re-post, no Job creation)
+# ============================================================================
+preconditions:
+  - name: "clusterDetails"
+    api_call:
+      method: "GET"
+      url: "/clusters/{{ .clusterId }}"
+      timeout: 10s
+      retry_attempts: 3
+      retry_backoff: "exponential"
+    capture:
+      - name: "clusterName"
+        field: "name"
+      - name: "generation"
+        field: "generation"
+
+  - name: "adapterStatuses"
+    api_call:
+      method: "GET"
+      url: "/clusters/{{ .clusterId }}/statuses"
+      timeout: 10s
+      retry_attempts: 3
+      retry_backoff: "exponential"
+    capture:
+      - name: "existingPlacementMC"
+        expression: |
+          items.filter(s, s.adapter == "placement-adapter").size() > 0
+          && has(items.filter(s, s.adapter == "placement-adapter")[0].data)
+          && has(items.filter(s, s.adapter == "placement-adapter")[0].data.managementClusterName)
+            ? items.filter(s, s.adapter == "placement-adapter")[0].data.managementClusterName
+            : ""
+      - name: "existingBaseDomain"
+        expression: |
+          items.filter(s, s.adapter == "placement-adapter").size() > 0
+          && has(items.filter(s, s.adapter == "placement-adapter")[0].data)
+          && has(items.filter(s, s.adapter == "placement-adapter")[0].data.baseDomain)
+            ? items.filter(s, s.adapter == "placement-adapter")[0].data.baseDomain
+            : ""
+
+  # Gate: only proceed if placement is incomplete.
+  # Both MC and baseDomain must be populated for placement to be considered done.
+  # If either is empty (e.g. DNS failed but MC succeeded) the gate stays open → retry.
+  - name: "placementGate"
+    expression: |
+      existingPlacementMC == "" || existingBaseDomain == ""
+
+# ============================================================================
+# Phase 3: Resources — placement Job
+#
+# Single container that cross-checks SM + Maestro and patches
+# its own .status.conditions with the placement result.
+# ============================================================================
+resources:
+  - name: "placementJob"
+    transport:
+      client: "kubernetes"
+    manifest:
+      ref: "/etc/adapter/job.yaml"
+    discovery:
+      by_selectors:
+        label_selector:
+          hyperfleet.io/cluster-id: "{{ .clusterId }}"
+          hyperfleet.io/resource-type: "job"
+          hyperfleet.io/managed-by: "placement-adapter"
+
+# ============================================================================
+# Phase 4: Status reporting
+#
+# Reports conditions extracted from the Job's three condition types:
+#   - MCPlacement:  management cluster selection result
+#   - DNSPlacement: DNS zone selection result
+#   - Available:    aggregate placement status
+# ============================================================================
+post:
+  payloads:
+    - name: "statusPayload"
+      build:
+        adapter: "{{ .adapter.name }}"
+        conditions:
+          - type: "Applied"
+            status:
+              expression: |
+                has(resources.placementJob) ? "True" : "False"
+            reason:
+              expression: |
+                has(resources.placementJob) ? "JobApplied" : "JobPending"
+            message:
+              expression: |
+                has(resources.placementJob)
+                  ? "Placement job applied successfully"
+                  : "Placement job is pending"
+
+          - type: "Available"
+            status:
+              expression: |
+                has(resources.placementJob)
+                  ? ( resources.?placementJob.?status.?conditions.orValue([]).exists(c, c.type == "Available")
+                      ? resources.placementJob.status.conditions.filter(c, c.type == "Available")[0].status
+                      : "Unknown")
+                  : "Unknown"
+            reason:
+              expression: |
+                has(resources.placementJob)
+                  ? ( resources.?placementJob.?status.?conditions.orValue([]).exists(c, c.type == "Available")
+                      ? resources.placementJob.status.conditions.filter(c, c.type == "Available")[0].reason
+                      : "JobInProgress")
+                  : "JobPending"
+            message:
+              expression: |
+                has(resources.placementJob)
+                  ? ( resources.?placementJob.?status.?conditions.orValue([]).exists(c, c.type == "Available")
+                      ? resources.placementJob.status.conditions.filter(c, c.type == "Available")[0].message
+                      : "Placement job has not completed yet")
+                  : "Placement job status not yet available"
+
+          - type: "MCPlacement"
+            status:
+              expression: |
+                has(resources.placementJob)
+                  ? ( resources.?placementJob.?status.?conditions.orValue([]).exists(c, c.type == "MCPlacement")
+                      ? resources.placementJob.status.conditions.filter(c, c.type == "MCPlacement")[0].status
+                      : "Unknown")
+                  : "Unknown"
+            reason:
+              expression: |
+                has(resources.placementJob)
+                  ? ( resources.?placementJob.?status.?conditions.orValue([]).exists(c, c.type == "MCPlacement")
+                      ? resources.placementJob.status.conditions.filter(c, c.type == "MCPlacement")[0].reason
+                      : "JobInProgress")
+                  : "JobPending"
+            message:
+              expression: |
+                has(resources.placementJob)
+                  ? ( resources.?placementJob.?status.?conditions.orValue([]).exists(c, c.type == "MCPlacement")
+                      ? resources.placementJob.status.conditions.filter(c, c.type == "MCPlacement")[0].message
+                      : "MC placement pending")
+                  : "MC placement not yet available"
+
+          - type: "DNSPlacement"
+            status:
+              expression: |
+                has(resources.placementJob)
+                  ? ( resources.?placementJob.?status.?conditions.orValue([]).exists(c, c.type == "DNSPlacement")
+                      ? resources.placementJob.status.conditions.filter(c, c.type == "DNSPlacement")[0].status
+                      : "Unknown")
+                  : "Unknown"
+            reason:
+              expression: |
+                has(resources.placementJob)
+                  ? ( resources.?placementJob.?status.?conditions.orValue([]).exists(c, c.type == "DNSPlacement")
+                      ? resources.placementJob.status.conditions.filter(c, c.type == "DNSPlacement")[0].reason
+                      : "JobInProgress")
+                  : "JobPending"
+            message:
+              expression: |
+                has(resources.placementJob)
+                  ? ( resources.?placementJob.?status.?conditions.orValue([]).exists(c, c.type == "DNSPlacement")
+                      ? resources.placementJob.status.conditions.filter(c, c.type == "DNSPlacement")[0].message
+                      : "DNS zone placement pending")
+                  : "DNS zone placement not yet available"
+
+          - type: "Health"
+            status:
+              expression: |
+                adapter.?executionStatus.orValue("") == "success"
+                  && !adapter.?resourcesSkipped.orValue(false)
+                ? "True"
+                : "False"
+            reason:
+              expression: |
+                adapter.?executionStatus.orValue("") != "success"
+                ? "ExecutionFailed:" + adapter.?executionError.?phase.orValue("unknown")
+                : adapter.?resourcesSkipped.orValue(false)
+                  ? "ResourcesSkipped"
+                  : "Healthy"
+            message:
+              expression: |
+                adapter.?executionStatus.orValue("") != "success"
+                ? "Adapter failed at phase ["
+                    + adapter.?executionError.?phase.orValue("unknown")
+                    + "] step ["
+                    + adapter.?executionError.?step.orValue("unknown")
+                    + "]: "
+                    + adapter.?executionError.?message.orValue(adapter.?errorMessage.orValue("no details"))
+                : adapter.?resourcesSkipped.orValue(false)
+                  ? "Resources skipped: " + adapter.?skipReason.orValue("unknown reason")
+                  : "Adapter execution completed successfully"
+
+        observed_generation:
+          expression: "generation"
+        observed_time: "{{ now | date \"2006-01-02T15:04:05Z07:00\" }}"
+
+        data:
+          managementClusterName:
+            expression: |
+              has(resources.placementJob)
+                && resources.?placementJob.?status.?conditions.orValue([]).exists(c, c.type == "MCPlacement" && c.status == "True")
+                ? resources.placementJob.status.conditions.filter(c, c.type == "MCPlacement")[0].message
+                : ""
+          managementClusterNamespace:
+            expression: |
+              "clusters-" + clusterId
+          baseDomain:
+            expression: |
+              has(resources.placementJob)
+                && resources.?placementJob.?status.?conditions.orValue([]).exists(c, c.type == "DNSPlacement" && c.status == "True")
+                ? resources.placementJob.status.conditions.filter(c, c.type == "DNSPlacement")[0].message
+                : ""
+
+  post_actions:
+    - name: "reportPlacementStatus"
+      api_call:
+        method: "POST"
         url: "/clusters/{{ .clusterId }}/statuses"
-        timeout: 10s
-        retryAttempts: 3
-        retryBackoff: "exponential"
-      capture:
-        - name: "existingPlacementMC"
-          expression: |
-            items.filter(s, s.adapter == "adapter-placement-job").size() > 0
-            && has(items.filter(s, s.adapter == "adapter-placement-job")[0].data)
-            && has(items.filter(s, s.adapter == "adapter-placement-job")[0].data.managementClusterName)
-              ? items.filter(s, s.adapter == "adapter-placement-job")[0].data.managementClusterName
-              : ""
-        - name: "existingBaseDomain"
-          expression: |
-            items.filter(s, s.adapter == "adapter-placement-job").size() > 0
-            && has(items.filter(s, s.adapter == "adapter-placement-job")[0].data)
-            && has(items.filter(s, s.adapter == "adapter-placement-job")[0].data.baseDomain)
-              ? items.filter(s, s.adapter == "adapter-placement-job")[0].data.baseDomain
-              : ""
-
-    # Gate: only proceed if placement is incomplete.
-    # Both MC and baseDomain must be populated for placement to be considered done.
-    # If either is empty (e.g. DNS failed but MC succeeded) the gate stays open → retry.
-    - name: "placementGate"
-      expression: |
-        existingPlacementMC == "" || existingBaseDomain == ""
-
-  # ============================================================================
-  # Phase 3: Resources — placement Job
-  #
-  # Single container that cross-checks SM + Maestro and patches
-  # its own .status.conditions with the placement result.
-  # ============================================================================
-  resources:
-    - name: "placementJob"
-      transport:
-        client: "kubernetes"
-      manifest:
-        ref: "/etc/adapter/job.yaml"
-      discovery:
-        bySelectors:
-          labelSelector:
-            hyperfleet.io/cluster-id: "{{ .clusterId }}"
-            hyperfleet.io/resource-type: "job"
-            hyperfleet.io/managed-by: "adapter-placement-job"
-
-  # ============================================================================
-  # Phase 4: Status reporting
-  #
-  # Reports conditions extracted from the Job's three condition types:
-  #   - MCPlacement:  management cluster selection result
-  #   - DNSPlacement: DNS zone selection result
-  #   - Available:    aggregate placement status
-  # ============================================================================
-  post:
-    payloads:
-      - name: "statusPayload"
-        build:
-          adapter: "{{ .metadata.name }}"
-          conditions:
-            - type: "Applied"
-              status:
-                expression: |
-                  has(resources.placementJob) ? "True" : "False"
-              reason:
-                expression: |
-                  has(resources.placementJob) ? "JobApplied" : "JobPending"
-              message:
-                expression: |
-                  has(resources.placementJob)
-                    ? "Placement job applied successfully"
-                    : "Placement job is pending"
-
-            - type: "Available"
-              status:
-                expression: |
-                  has(resources.placementJob)
-                    ? ( resources.?placementJob.?status.?conditions.orValue([]).exists(c, c.type == "Available")
-                        ? resources.placementJob.status.conditions.filter(c, c.type == "Available")[0].status
-                        : "Unknown")
-                    : "Unknown"
-              reason:
-                expression: |
-                  has(resources.placementJob)
-                    ? ( resources.?placementJob.?status.?conditions.orValue([]).exists(c, c.type == "Available")
-                        ? resources.placementJob.status.conditions.filter(c, c.type == "Available")[0].reason
-                        : "JobInProgress")
-                    : "JobPending"
-              message:
-                expression: |
-                  has(resources.placementJob)
-                    ? ( resources.?placementJob.?status.?conditions.orValue([]).exists(c, c.type == "Available")
-                        ? resources.placementJob.status.conditions.filter(c, c.type == "Available")[0].message
-                        : "Placement job has not completed yet")
-                    : "Placement job status not yet available"
-
-            - type: "MCPlacement"
-              status:
-                expression: |
-                  has(resources.placementJob)
-                    ? ( resources.?placementJob.?status.?conditions.orValue([]).exists(c, c.type == "MCPlacement")
-                        ? resources.placementJob.status.conditions.filter(c, c.type == "MCPlacement")[0].status
-                        : "Unknown")
-                    : "Unknown"
-              reason:
-                expression: |
-                  has(resources.placementJob)
-                    ? ( resources.?placementJob.?status.?conditions.orValue([]).exists(c, c.type == "MCPlacement")
-                        ? resources.placementJob.status.conditions.filter(c, c.type == "MCPlacement")[0].reason
-                        : "JobInProgress")
-                    : "JobPending"
-              message:
-                expression: |
-                  has(resources.placementJob)
-                    ? ( resources.?placementJob.?status.?conditions.orValue([]).exists(c, c.type == "MCPlacement")
-                        ? resources.placementJob.status.conditions.filter(c, c.type == "MCPlacement")[0].message
-                        : "MC placement pending")
-                    : "MC placement not yet available"
-
-            - type: "DNSPlacement"
-              status:
-                expression: |
-                  has(resources.placementJob)
-                    ? ( resources.?placementJob.?status.?conditions.orValue([]).exists(c, c.type == "DNSPlacement")
-                        ? resources.placementJob.status.conditions.filter(c, c.type == "DNSPlacement")[0].status
-                        : "Unknown")
-                    : "Unknown"
-              reason:
-                expression: |
-                  has(resources.placementJob)
-                    ? ( resources.?placementJob.?status.?conditions.orValue([]).exists(c, c.type == "DNSPlacement")
-                        ? resources.placementJob.status.conditions.filter(c, c.type == "DNSPlacement")[0].reason
-                        : "JobInProgress")
-                    : "JobPending"
-              message:
-                expression: |
-                  has(resources.placementJob)
-                    ? ( resources.?placementJob.?status.?conditions.orValue([]).exists(c, c.type == "DNSPlacement")
-                        ? resources.placementJob.status.conditions.filter(c, c.type == "DNSPlacement")[0].message
-                        : "DNS zone placement pending")
-                    : "DNS zone placement not yet available"
-
-            - type: "Health"
-              status:
-                expression: |
-                  adapter.?executionStatus.orValue("") == "success"
-                    ? "True" : "False"
-              reason:
-                expression: |
-                  adapter.?executionStatus.orValue("") != "success"
-                    ? "ExecutionFailed"
-                    : "Healthy"
-              message:
-                expression: |
-                  adapter.?executionStatus.orValue("") != "success"
-                    ? "Adapter execution failed"
-                    : "Adapter execution completed successfully"
-
-          observed_generation:
-            expression: "generation"
-          observed_time: "{{ now | date \"2006-01-02T15:04:05Z07:00\" }}"
-
-          data:
-            managementClusterName:
-              expression: |
-                has(resources.placementJob)
-                  && resources.?placementJob.?status.?conditions.orValue([]).exists(c, c.type == "MCPlacement" && c.status == "True")
-                  ? resources.placementJob.status.conditions.filter(c, c.type == "MCPlacement")[0].message
-                  : ""
-            managementClusterNamespace:
-              expression: |
-                "clusters-" + clusterId
-            baseDomain:
-              expression: |
-                has(resources.placementJob)
-                  && resources.?placementJob.?status.?conditions.orValue([]).exists(c, c.type == "DNSPlacement" && c.status == "True")
-                  ? resources.placementJob.status.conditions.filter(c, c.type == "DNSPlacement")[0].message
-                  : ""
-
-    postActions:
-      - name: "reportPlacementStatus"
-        apiCall:
-          method: "POST"
-          url: "/clusters/{{ .clusterId }}/statuses"
-          headers:
-            - name: "Content-Type"
-              value: "application/json"
-          body: "{{ .statusPayload }}"
+        headers:
+          - name: "Content-Type"
+            value: "application/json"
+        body: "{{ .statusPayload }}"

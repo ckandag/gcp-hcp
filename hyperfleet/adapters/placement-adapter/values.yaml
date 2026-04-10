@@ -3,11 +3,16 @@ hyperfleet-adapter:
     registry: quay.io/openshift-hyperfleet
     repository: hyperfleet-adapter
     pullPolicy: Always
-    tag: v0.1.1
+    tag: v0.2.0
 
   adapterConfig:
     create: true
     # injected via ArgoCD fileParameters or --set-file at install time
+    hyperfleetApi:
+      baseUrl: http://hyperfleet-api.hyperfleet.svc.cluster.local:8000
+      version: v1
+    log:
+      level: info
 
   adapterTaskConfig:
     create: false
@@ -16,17 +21,16 @@ hyperfleet-adapter:
   broker:
     create: true
     googlepubsub:
-      projectId: "dev-reg-us-c1-ckandagb3fc"
-      subscriptionId: hyperfleet-cluster-events-adapter-placement-job
+      projectId: ""
+      subscriptionId: hyperfleet-cluster-events-placement-adapter
       topic: hyperfleet-cluster-events
       createTopicIfMissing: false
       createSubscriptionIfMissing: false
 
   serviceAccount:
     create: true
-    name: hyperfleet-adapter-placement-job
-    annotations:
-      iam.gke.io/gcp-service-account: placement-adapter@dev-reg-us-c1-ckandagb3fc.iam.gserviceaccount.com
+    name: placement-adapter
+    annotations: {}
 
   env:
     - name: NAMESPACE
@@ -38,7 +42,7 @@ hyperfleet-adapter:
         fieldRef:
           fieldPath: spec.serviceAccountName
     - name: GCP_PROJECT_ID
-      value: "dev-reg-us-c1-ckandagb3fc"
+      value: ""
     - name: MAESTRO_URL
       value: "http://maestro.hyperfleet.svc.cluster.local:8000"
     - name: HYPERFLEET_API_URL

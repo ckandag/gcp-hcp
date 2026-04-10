@@ -12,7 +12,7 @@ metadata:
   labels:
     hyperfleet.io/cluster-id: "{{ .clusterId }}"
     hyperfleet.io/resource-type: "job"
-    hyperfleet.io/managed-by: "adapter-placement-job"
+    hyperfleet.io/managed-by: "placement-adapter"
   annotations:
     hyperfleet.io/generation: "{{ .generation }}"
 spec:
