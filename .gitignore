@@ -45,6 +45,3 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
-
-# Helm vendored dependencies
-**/charts/*.tgz
