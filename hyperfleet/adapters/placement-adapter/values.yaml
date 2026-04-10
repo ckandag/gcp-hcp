@@ -11,7 +11,7 @@ hyperfleet-adapter:
 
   adapterTaskConfig:
     create: false
-    configMapName: adapter-placement-job-resources
+    configMapName: placement-adapter-resources
 
   broker:
     create: true
