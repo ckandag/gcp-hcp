@@ -56,3 +56,27 @@ hyperfleet-adapter:
       - jobs
       - jobs/status
       - pods
+
+# Config Connector resources for this adapter's GCP infrastructure.
+# Creates: GCP SA, WIF binding, Pub/Sub subscription, IAM bindings.
+# Requires Config Connector installed on the cluster.
+gcpResources:
+  enabled: true
+  projectId: ""
+
+  serviceAccount:
+    name: placement-adapter
+    displayName: "Placement Adapter"
+    description: "GSA for HyperFleet placement adapter - Pub/Sub subscription and Secret Manager listing"
+
+  pubsub:
+    topic: hyperfleet-cluster-events
+    subscriptionName: hyperfleet-cluster-events-placement-adapter
+    ackDeadlineSeconds: 60
+    messageRetentionDuration: "604800s"
+
+  extraRoles:
+    - role: roles/secretmanager.viewer
+      scope: project
+    - role: roles/secretmanager.secretAccessor
+      scope: project
