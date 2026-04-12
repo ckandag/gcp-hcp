@@ -1,0 +1,65 @@
+hyperfleet-adapter:
+  image:
+    registry: quay.io/openshift-hyperfleet
+    repository: hyperfleet-adapter
+    pullPolicy: Always
+    tag: v0.2.0
+
+  adapterConfig:
+    create: true
+    hyperfleetApi:
+      baseUrl: http://hyperfleet-api.hyperfleet.svc.cluster.local:8000
+      version: v1
+    log:
+      level: info
+
+  adapterTaskConfig:
+    create: false
+    configMapName: signing-key-adapter-resources
+
+  broker:
+    create: true
+    googlepubsub:
+      projectId: ""
+      subscriptionId: hyperfleet-cluster-events-signing-key-adapter
+      topic: hyperfleet-cluster-events
+      createTopicIfMissing: false
+      createSubscriptionIfMissing: false
+
+  serviceAccount:
+    create: true
+    name: signing-key-adapter
+    annotations: {}
+
+  env:
+    - name: NAMESPACE
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+    - name: KEYGEN_IMAGE
+      value: "google/cloud-sdk:slim"
+    - name: KEYGEN_GCP_SA
+      value: ""
+
+  rbac:
+    resources:
+      - namespaces
+      - secrets
+      - configmaps
+
+gcpResources:
+  enabled: true
+  projectId: ""
+
+  serviceAccount:
+    name: signing-key-adapter
+    displayName: "Signing Key Adapter"
+    description: "GSA for HyperFleet signing-key adapter - Pub/Sub subscription for cluster events"
+
+  pubsub:
+    topic: hyperfleet-cluster-events
+    subscriptionName: hyperfleet-cluster-events-signing-key-adapter
+    ackDeadlineSeconds: 60
+    messageRetentionDuration: "604800s"
+
+  extraRoles: []

@@ -1,0 +1,67 @@
+hyperfleet-adapter:
+  image:
+    registry: quay.io/openshift-hyperfleet
+    repository: hyperfleet-adapter
+    pullPolicy: Always
+    tag: v0.2.0
+
+  adapterConfig:
+    create: true
+    hyperfleetApi:
+      baseUrl: http://hyperfleet-api.hyperfleet.svc.cluster.local:8000
+      version: v1
+    log:
+      level: info
+
+  adapterTaskConfig:
+    create: false
+    configMapName: hc-adapter-resources
+
+  broker:
+    create: true
+    googlepubsub:
+      projectId: ""
+      subscriptionId: hyperfleet-cluster-events-hc-adapter
+      topic: hyperfleet-cluster-events
+      createTopicIfMissing: false
+      createSubscriptionIfMissing: false
+
+  serviceAccount:
+    create: true
+    name: hc-adapter
+    annotations: {}
+
+  env:
+    - name: NAMESPACE
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+    - name: HC_RELEASE_IMAGE
+      value: "quay.io/openshift-release-dev/ocp-release:4.20.0-x86_64"
+    - name: PULL_SECRET_STORE_NAME
+      value: "gcp-secret-manager"
+    - name: PULL_SECRET_GCP_KEY
+      value: "default-openshift-pull-secret"
+
+  rbac:
+    resources:
+      - namespaces
+      - secrets
+      - configmaps
+
+gcpResources:
+  enabled: true
+  projectId: ""
+
+  serviceAccount:
+    name: hc-adapter
+    displayName: "HostedCluster Adapter"
+    description: "GSA for HyperFleet HC adapter - Pub/Sub subscription for cluster events"
+
+  pubsub:
+    topic: hyperfleet-cluster-events
+    subscriptionName: hyperfleet-cluster-events-hc-adapter
+    ackDeadlineSeconds: 60
+    messageRetentionDuration: "604800s"
+
+  extraRoles: []

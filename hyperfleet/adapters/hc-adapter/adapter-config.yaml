@@ -1,0 +1,25 @@
+adapter:
+  name: hc-adapter
+  version: "0.2.0"
+
+debug_config: true
+log:
+  level: debug
+
+clients:
+  hyperfleet_api:
+    base_url: http://hyperfleet-api:8000
+    version: v1
+    timeout: 10s
+    retry_attempts: 3
+    retry_backoff: exponential
+
+  maestro:
+    grpc_server_address: "maestro-grpc.hyperfleet.svc.cluster.local:8090"
+    http_server_address: "http://maestro.hyperfleet.svc.cluster.local:8000"
+    source_id: "hc-adapter"
+    client_id: "hc-adapter-client"
+    insecure: true
+
+  kubernetes:
+    api_version: "v1"
