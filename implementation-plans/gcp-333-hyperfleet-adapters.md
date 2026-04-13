@@ -55,7 +55,7 @@ For full Maestro Pub/Sub topology, consumer registration, and infrastructure det
 
 ### Dependency Chain
 
-```
+```text
 placement-adapter → ... → hostedcluster-adapter → ...
 ```
 
@@ -131,9 +131,9 @@ All adapter documents follow a consistent structure. When creating a new adapter
 ## References
 
 ### Architecture
-- [HyperFleet Architecture](https://github.com/openshift-hyperfleet/architecture) — `hyperfleet/architecture/architecture-summary.md`
-- [Adapter Framework Design](https://github.com/openshift-hyperfleet/architecture) — `hyperfleet/components/adapter/framework/`
-- [Adapter Status Contract](https://github.com/openshift-hyperfleet/architecture) — `hyperfleet/components/adapter/framework/adapter-status-contract.md`
-- [HyperFleet API Status Guide](https://github.com/openshift-hyperfleet/architecture) — `hyperfleet/docs/status-guide.md`
-- [Maestro Integration Guide](https://github.com/openshift-hyperfleet/architecture) — `hyperfleet/components/adapter/framework/maestro-integration-guide.md`
+- [HyperFleet Architecture](https://github.com/openshift-hyperfleet/architecture/blob/main/hyperfleet/README.md)
+- [Adapter Framework Design](https://github.com/openshift-hyperfleet/architecture/tree/main/hyperfleet/components/adapter/framework)
+- [Adapter Status Contract](https://github.com/openshift-hyperfleet/architecture/blob/main/hyperfleet/components/adapter/framework/adapter-status-contract.md)
+- [HyperFleet API Status Guide](https://github.com/openshift-hyperfleet/architecture/blob/main/hyperfleet/docs/status-guide.md)
+- [Maestro Integration Guide](https://github.com/openshift-hyperfleet/architecture/blob/main/hyperfleet/components/adapter/framework/maestro-integration-guide.md)
 

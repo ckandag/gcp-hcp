@@ -19,11 +19,13 @@ Selects a target management cluster and DNS zone for a new HostedCluster, and wr
 
 Eligible MCs are identified by listing Secret Manager secrets in the regional project, created by the management-cluster Terraform module when a new MC is provisioned. These are cross-checked against Maestro's registered consumers to confirm the agent is connected and healthy. This naturally excludes MCs that are still being provisioned, have disconnected agents, or are being decommissioned. No region filtering is needed — all candidates are inherently in the same region as the placement adapter.
 
-Among eligible MCs, the Job picks the least-loaded one by counting existing cluster placements in the HyperFleet API against each MC's `gcp-hcp/max-clusters` capacity label (set by Terraform on the Secret Manager secret). If all MCs are at capacity, the adapter reports `Available: False` with `MCPlacement: False` and a message such as `"No management cluster available with remaining capacity"` and downstream adapters skip processing until capacity frees up.
+Among eligible MCs, the Job picks the least-loaded one by counting existing cluster placements in the HyperFleet API. When multiple MCs share the same lowest count, the Job breaks ties lexicographically by MC name for deterministic, reproducible placement.
+
+**Capacity enforcement** is optional. Each MC's Secret Manager secret may carry a `gcp-hcp/max-clusters` label (set by Terraform) that caps how many clusters can be placed on it. If the label is absent, there is no capacity restriction — the MC is always eligible regardless of current load. When all MCs that *do* have a cap are at capacity and no uncapped MCs remain, the adapter reports `Available: False` with `MCPlacement: False` and a message such as `"No management cluster available with remaining capacity"`, and downstream adapters skip processing until capacity frees up.
 
 ### DNS Zone Selection
 
-Available DNS domains are identified by reading the regional ArgoCD cluster secret in Secret Manager (labeled `infra-type:region`), which contains a `meta_hc_dns_domains` field — a comma-separated list of base domains provisioned for hosted clusters. The Job selects the least-loaded domain by counting existing cluster placements in the HyperFleet API per domain. If no DNS domains are found or all domains are at capacity, the Job reports `Available: False` with `DNSPlacement: False` and a message such as `"No DNS domain available with remaining capacity"` and downstream adapters skip processing until capacity frees up.
+Available DNS domains are identified by reading the regional ArgoCD cluster secret in Secret Manager (labeled `infra-type:region`), which contains a `meta_hc_dns_domains` field — a comma-separated list of base domains provisioned for hosted clusters. The Job selects the least-loaded domain by counting existing cluster placements in the HyperFleet API per domain. When multiple domains share the same lowest count, the Job breaks ties lexicographically by domain name for deterministic, reproducible placement. Both MC and DNS load counts are derived from a single HyperFleet API query to avoid redundant calls. If no DNS domains are found or all domains are at capacity, the Job reports `Available: False` with `DNSPlacement: False` and a message such as `"No DNS domain available with remaining capacity"` and downstream adapters skip processing until capacity frees up.
 
 ### Placement Decision Output
 
@@ -73,9 +75,9 @@ Reports the three mandatory conditions plus two adapter-specific conditions:
 ## Idempotency & Edge Cases
 
 - **First run**: performs selection algorithm, writes placement decision
-- **Subsequent runs (same generation)**: reads existing placement from prior status, reports same MC — skips re-selection
-- **Generation change (spec update)**: placement is sticky — reports existing MC with bumped `observed_generation`. MC assignment does not change on spec update.
-- **Re-placement**: not supported in MVP. If needed post-MVP, could be triggered via a dedicated annotation or admin API.
+- **Subsequent runs (same generation)**: reads existing placement from prior status, reports same MC and DNS — skips re-selection
+- **Generation change (spec update)**: placement is sticky — reports existing MC with bumped `observed_generation`. MC assignment does not change on spec update. This means a cluster that was placed on MC-A at generation 1 remains on MC-A even if MC-A becomes the most loaded by generation 2. Sticky placement avoids costly cross-MC migrations but means load may skew over time as clusters are updated without being redistributed. If rebalancing is needed post-MVP, see re-placement below.
+- **Re-placement**: not supported in MVP. If needed post-MVP, could be triggered via a dedicated annotation or admin API to clear the existing placement and allow the adapter to re-run the selection algorithm.
 
 ## Credentials
 
