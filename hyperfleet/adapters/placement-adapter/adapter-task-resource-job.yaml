@@ -252,7 +252,7 @@ spec:
               fi
               echo "Selected MC: ${SELECTED}"
 
-              # ── Step 6: DNS zone selection ──────────────────────────────
+              # ── Step 6: DNS zone selection (with capacity check) ─────────
               echo "Reading HC DNS domains from Secret Manager..."
               ARGOCD_SECRET_NAME=$(gcloud secrets list \
                 --project="${GCP_PROJECT_ID}" \
@@ -276,22 +276,90 @@ spec:
                 exit 1
               fi
 
+              echo "Fetching DNS zone quota and record counts..."
+              DNS_QUOTA=$(gcloud dns project-info describe "${GCP_PROJECT_ID}" \
+                --format='value(quota.rrsetsPerManagedZone)' 2>/dev/null) || DNS_QUOTA=""
+              echo "DNS quota (rrsetsPerManagedZone): ${DNS_QUOTA:-unknown}"
+
+              DNS_ZONES_JSON=$(gcloud dns managed-zones list \
+                --project="${GCP_PROJECT_ID}" \
+                --format='json(name,dnsName)' 2>/dev/null) || DNS_ZONES_JSON="[]"
+
               BASE_DOMAIN=$(python3 -c "
-              import json, sys
+              import json, sys, subprocess
 
               dns_str = '${HC_DNS_DOMAINS}'
+              project = '${GCP_PROJECT_ID}'
+              quota = int('${DNS_QUOTA}') if '${DNS_QUOTA}'.isdigit() else 0
               domains = [d.strip() for d in dns_str.split(',') if d.strip()]
-              domain_counts = {d: 0 for d in domains}
+              zones_json = json.loads('''${DNS_ZONES_JSON}''')
               placement_data = json.loads('''${PLACEMENT_DATA}''')
 
-              for d in placement_data.get('dns', []):
-                  if d in domain_counts:
-                      domain_counts[d] += 1
+              # Map each domain to its zone name via dnsName match
+              domain_to_zone = {}
+              for zone in zones_json:
+                  dns_name = zone.get('dnsName', '').rstrip('.')
+                  zone_name = zone.get('name', '')
+                  for d in domains:
+                      if d == dns_name:
+                          domain_to_zone[d] = zone_name
 
-              sys.stderr.write(f'DNS domain counts: {domain_counts}\n')
-              selected = min(domains, key=lambda d: (domain_counts[d], d))
+              # Count actual records per zone for capacity check
+              record_counts = {}
+              for d in domains:
+                  zone_name = domain_to_zone.get(d)
+                  if not zone_name:
+                      sys.stderr.write(f'No zone found for {d}, treating as empty\n')
+                      record_counts[d] = 0
+                      continue
+                  try:
+                      result = subprocess.run(
+                          ['gcloud', 'dns', 'record-sets', 'list',
+                           '--zone', zone_name, '--project', project,
+                           '--format', 'value(name)'],
+                          capture_output=True, text=True, timeout=30)
+                      record_counts[d] = len([l for l in result.stdout.strip().split('\n') if l])
+                  except Exception as e:
+                      sys.stderr.write(f'Failed to count records for {zone_name}: {e}\n')
+                      record_counts[d] = 0
+
+              sys.stderr.write(f'DNS record counts: {record_counts}\n')
+
+              # Capacity filter: exclude zones at or near quota (90% threshold)
+              threshold = int(quota * 0.9) if quota > 0 else 0
+              available = []
+              for d in domains:
+                  if quota <= 0:
+                      available.append(d)
+                  elif record_counts[d] < threshold:
+                      available.append(d)
+                  else:
+                      sys.stderr.write(f'{d} at capacity ({record_counts[d]}/{quota})\n')
+
+              if not available:
+                  print('ALL_DNS_AT_CAPACITY', end='')
+                  sys.exit(0)
+
+              # Selection: least-loaded by cluster placement count
+              cluster_counts = {d: 0 for d in available}
+              for d in placement_data.get('dns', []):
+                  if d in cluster_counts:
+                      cluster_counts[d] += 1
+
+              sys.stderr.write(f'DNS cluster counts: {cluster_counts}\n')
+              selected = min(available, key=lambda d: (cluster_counts[d], d))
               print(selected, end='')
               ")
+
+              if [ "${BASE_DOMAIN}" = "ALL_DNS_AT_CAPACITY" ]; then
+                MC_COND=$(build_condition "MCPlacement" "True" "MCSelected" "${SELECTED}")
+                DNS_COND=$(build_condition "DNSPlacement" "False" "AllDNSAtCapacity" \
+                  "All DNS zones are at maximum record capacity")
+                AVAIL_COND=$(build_condition "Available" "False" "PlacementFailed" \
+                  "No DNS zone available with remaining capacity")
+                patch_job_conditions "[${MC_COND},${DNS_COND},${AVAIL_COND}]"
+                exit 1
+              fi
               echo "Selected DNS zone: ${BASE_DOMAIN}"
 
               # ── Step 7: Patch Job conditions with results ───────────────
