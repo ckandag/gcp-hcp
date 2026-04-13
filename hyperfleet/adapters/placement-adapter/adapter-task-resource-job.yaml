@@ -88,12 +88,21 @@ spec:
               }
 
               # ── Step 1: Secret Manager ─────────────────────────────────
+              # Query MC secrets and read both consumer name and optional capacity label.
               echo "Querying Secret Manager for MC secrets..."
               _sm_err=$(mktemp)
-              SM_MCS=$(gcloud secrets list \
+              SM_JSON=$(gcloud secrets list \
                 --project="${GCP_PROJECT_ID}" \
                 --filter='labels.maestro-consumer-name:*' \
-                --format='value(labels.maestro-consumer-name)' 2>"${_sm_err}") || true
+                --format='json(labels)' 2>"${_sm_err}") || true
+
+              SM_MCS=$(echo "${SM_JSON}" | python3 -c "
+              import sys, json
+              secrets = json.load(sys.stdin)
+              for s in secrets:
+                  labels = s.get('labels', {})
+                  print(labels.get('maestro-consumer-name', ''))
+              " 2>/dev/null) || true
 
               if [ -z "${SM_MCS}" ]; then
                 echo "ERROR: No MC secrets found in Secret Manager"
@@ -105,6 +114,20 @@ spec:
               fi
               rm -f "${_sm_err}"
               echo "Secret Manager MCs: $(echo ${SM_MCS} | tr '\n' ', ')"
+
+              # Build capacity map: {mc_name: max_clusters or -1 if unlimited}
+              MC_CAPS_JSON=$(echo "${SM_JSON}" | python3 -c "
+              import sys, json
+              secrets = json.load(sys.stdin)
+              caps = {}
+              for s in secrets:
+                  labels = s.get('labels', {})
+                  mc = labels.get('maestro-consumer-name', '')
+                  max_val = labels.get('gcp-hcp_max-clusters', labels.get('max-clusters', ''))
+                  caps[mc] = int(max_val) if max_val.isdigit() else -1
+              print(json.dumps(caps))
+              " 2>/dev/null)
+              echo "MC capacity map: ${MC_CAPS_JSON}"
 
               # ── Step 2: Maestro consumers ──────────────────────────────
               echo "Querying Maestro consumers..."
@@ -143,24 +166,22 @@ spec:
               fi
               echo "Eligible MCs: $(echo ${ELIGIBLE} | tr '\n' ', ')"
 
-              # ── Step 4: Select least-loaded MC ─────────────────────────
-              ELIGIBLE_COUNT=$(echo "${ELIGIBLE}" | wc -l | tr -d ' ')
-              if [ "${ELIGIBLE_COUNT}" -eq 1 ]; then
-                  SELECTED=$(echo "${ELIGIBLE}" | head -1)
-                  echo "Single eligible MC, skipping load query"
-              else
-                  echo "Querying HyperFleet API for cluster counts across ${ELIGIBLE_COUNT} MCs..."
-                  SELECTED=$(python3 -c "
-                  import json, urllib.request, sys
+              # ── Step 4: Select least-loaded MC (with capacity check) ──
+              echo "Querying HyperFleet API for cluster counts..."
+              CLUSTERS_JSON=$(curl -sf "${HYPERFLEET_API_URL}/api/hyperfleet/v1/clusters?size=1000" 2>/dev/null) || CLUSTERS_JSON=""
 
-                  eligible = '''${ELIGIBLE}'''.strip().split('\n')
-                  api_url = '${HYPERFLEET_API_URL}'
-                  mc_counts = {mc: 0 for mc in eligible}
+              SELECTED=$(python3 -c "
+              import json, sys
 
+              eligible = '''${ELIGIBLE}'''.strip().split('\n')
+              mc_caps = json.loads('${MC_CAPS_JSON}')
+              clusters_json = '''${CLUSTERS_JSON}'''
+
+              mc_counts = {mc: 0 for mc in eligible}
+
+              if clusters_json:
                   try:
-                      url = f'{api_url}/api/hyperfleet/v1/clusters?size=1000'
-                      with urllib.request.urlopen(url, timeout=10) as resp:
-                          clusters = json.load(resp)
+                      clusters = json.loads(clusters_json)
                       for cluster in clusters.get('items', []):
                           for c in cluster.get('status', {}).get('conditions', []):
                               if c.get('reason') == 'MCSelected' and c.get('status') == 'True':
@@ -169,14 +190,35 @@ spec:
                                       mc_counts[mc] += 1
                                   break
                   except Exception as e:
-                      print(eligible[0], end='')
-                      sys.stderr.write(f'HyperFleet API unavailable ({e}), falling back to first eligible\n')
-                      sys.exit(0)
+                      sys.stderr.write(f'Failed to parse cluster data ({e}), ignoring capacity\n')
+              else:
+                  sys.stderr.write('HyperFleet API unavailable, skipping capacity check\n')
 
-                  selected = min(eligible, key=lambda mc: mc_counts[mc])
-                  sys.stderr.write(f'Cluster counts: {mc_counts}\n')
-                  print(selected, end='')
-                  ")
+              sys.stderr.write(f'Cluster counts: {mc_counts}\n')
+
+              # Filter out MCs that are at capacity (only when cap is set, i.e. > 0)
+              available = []
+              for mc in eligible:
+                  cap = mc_caps.get(mc, -1)
+                  if cap < 0:
+                      available.append(mc)  # no cap set, unlimited
+                  elif mc_counts[mc] < cap:
+                      available.append(mc)
+                  else:
+                      sys.stderr.write(f'MC {mc} at capacity ({mc_counts[mc]}/{cap})\n')
+
+              if not available:
+                  print('ALL_AT_CAPACITY', end='')
+                  sys.exit(0)
+
+              selected = min(available, key=lambda mc: (mc_counts[mc], mc))
+              print(selected, end='')
+              ")
+
+              if [ "${SELECTED}" = "ALL_AT_CAPACITY" ]; then
+                patch_failure "AllMCsAtCapacity" \
+                  "All eligible management clusters are at maximum capacity"
+                exit 1
               fi
               echo "Selected MC: ${SELECTED}"
 
@@ -204,7 +246,32 @@ spec:
                 exit 1
               fi
 
-              BASE_DOMAIN=$(echo "${HC_DNS_DOMAINS}" | tr ',' '\n' | head -1)
+              # Select least-loaded DNS domain from the same HyperFleet API response.
+              BASE_DOMAIN=$(python3 -c "
+              import json, sys
+
+              dns_str = '${HC_DNS_DOMAINS}'
+              domains = [d.strip() for d in dns_str.split(',') if d.strip()]
+              domain_counts = {d: 0 for d in domains}
+              clusters_json = '''${CLUSTERS_JSON}'''
+
+              if clusters_json:
+                  try:
+                      clusters = json.loads(clusters_json)
+                      for cluster in clusters.get('items', []):
+                          for c in cluster.get('status', {}).get('conditions', []):
+                              if c.get('reason') == 'DNSZoneSelected' and c.get('status') == 'True':
+                                  d = c.get('message', '')
+                                  if d in domain_counts:
+                                      domain_counts[d] += 1
+                                  break
+                  except Exception as e:
+                      sys.stderr.write(f'Failed to parse cluster data for DNS ({e})\n')
+
+              sys.stderr.write(f'DNS domain counts: {domain_counts}\n')
+              selected = min(domains, key=lambda d: (domain_counts[d], d))
+              print(selected, end='')
+              ")
               echo "Selected DNS zone: ${BASE_DOMAIN}"
 
               # ── Step 6: Patch Job conditions with results ───────────────
