@@ -80,3 +80,5 @@ gcpResources:
       scope: project
     - role: roles/secretmanager.secretAccessor
       scope: project
+    - role: roles/dns.reader
+      scope: project
