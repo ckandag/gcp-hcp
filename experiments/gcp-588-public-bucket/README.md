@@ -251,9 +251,6 @@ Either option requires an org policy update to `constraints/iam.allowedPolicyMem
 - **Option A**: Add conditional tag exception allowing `allUsers` on tagged buckets
 - **Option B**: Add `cloud-cdn-fill.iam.gserviceaccount.com` to the allowed domains
 
-**Action item**: cblecker to determine feasibility and request the org policy change.
-Both options should be tested once the policy is updated.
-
 ### Key Learnings
 
 - The `cloud-cdn-fill` SA is **not** auto-created with `compute.googleapis.com`. It requires
