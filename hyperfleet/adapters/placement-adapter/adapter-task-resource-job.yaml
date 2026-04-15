@@ -54,7 +54,7 @@ spec:
             - name: tmp
               mountPath: /tmp
             - name: gcloud-config
-              mountPath: /.config
+              mountPath: /tmp/.config
           command: ["/bin/bash", "-c"]
           args:
             - |
@@ -411,6 +411,8 @@ spec:
               echo "  MC:       ${SELECTED}"
               echo "  DNS Zone: ${BASE_DOMAIN}"
           env:
+            - name: HOME
+              value: /tmp
             - name: CLUSTER_ID
               value: "{{ .clusterId }}"
             - name: NAMESPACE
