@@ -28,11 +28,31 @@ spec:
     spec:
       serviceAccountName: "{{ .serviceAccountName }}"
       restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: gcloud-config
+          emptyDir: {}
 
       containers:
         - name: placement
           image: "{{ .placementImage }}"
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: gcloud-config
+              mountPath: /.config
           command: ["/bin/bash", "-c"]
           args:
             - |
@@ -50,13 +70,15 @@ spec:
               # Build a single JSON condition object.
               build_condition() {
                 local cond_type="$1" cond_status="$2" reason="$3" message="$4"
+                COND_TYPE="$cond_type" COND_STATUS="$cond_status" \
+                COND_REASON="$reason" COND_MESSAGE="$message" \
                 python3 -c "
-              import json, datetime
+              import json, datetime, os
               print(json.dumps({
-                'type': '${cond_type}',
-                'status': '${cond_status}',
-                'reason': '${reason}',
-                'message': '${message}',
+                'type': os.environ['COND_TYPE'],
+                'status': os.environ['COND_STATUS'],
+                'reason': os.environ['COND_REASON'],
+                'message': os.environ['COND_MESSAGE'],
                 'lastTransitionTime': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
               }))
               "
@@ -66,9 +88,9 @@ spec:
               patch_job_conditions() {
                 local conditions_json="$1"
                 local payload
-                payload=$(python3 -c "
-              import json
-              conditions = json.loads('${conditions_json}')
+                payload=$(echo "$conditions_json" | python3 -c "
+              import json, sys
+              conditions = json.load(sys.stdin)
               print(json.dumps({'status': {'conditions': conditions}}))
               ")
                 curl -sf --cacert "$CA" -H "Authorization: Bearer $TOKEN" \
@@ -84,6 +106,7 @@ spec:
                 local mc_cond avail_cond
                 mc_cond=$(build_condition "MCPlacement" "False" "$reason" "$message")
                 avail_cond=$(build_condition "Available" "False" "PlacementFailed" "$message")
+                echo "[${mc_cond},${avail_cond}]" | python3 -c "import sys,json; json.load(sys.stdin)" >/dev/null
                 patch_job_conditions "[${mc_cond},${avail_cond}]"
               }
 
@@ -91,7 +114,7 @@ spec:
               # Query MC secrets and read both consumer name and optional capacity label.
               echo "Querying Secret Manager for MC secrets..."
               _sm_err=$(mktemp)
-              SM_JSON=$(gcloud secrets list \
+              SM_JSON=$(timeout 30 gcloud secrets list \
                 --project="${GCP_PROJECT_ID}" \
                 --filter='labels.maestro-consumer-name:*' \
                 --format='json(labels)' 2>"${_sm_err}") || true
@@ -131,7 +154,9 @@ spec:
 
               # ── Step 2: Maestro consumers ──────────────────────────────
               echo "Querying Maestro consumers..."
-              MAESTRO_RESPONSE=$(curl -sf "${MAESTRO_URL}/api/maestro/v1/consumers?size=100" 2>/dev/null) || true
+              # size=100 assumes fewer than 100 MCs; increase or paginate if needed
+              MAESTRO_RESPONSE=$(curl -sf --connect-timeout 5 --max-time 30 \
+                "${MAESTRO_URL}/api/maestro/v1/consumers?size=100" 2>/dev/null) || true
 
               if [ -z "${MAESTRO_RESPONSE}" ]; then
                 patch_failure "MaestroUnavailable" \
@@ -173,43 +198,49 @@ spec:
               echo "Querying HyperFleet API for existing placements..."
               CLUSTERS_JSON=$(curl -sf "${HYPERFLEET_API_URL}/api/hyperfleet/v1/clusters?size=1000" 2>/dev/null) || CLUSTERS_JSON=""
 
-              PLACEMENT_DATA=$(python3 -c "
-              import json, sys, urllib.request
+              PLACEMENT_DATA=$(HYPERFLEET_API_URL="${HYPERFLEET_API_URL}" python3 -c "
+              import json, sys, os, urllib.request
+              from concurrent.futures import ThreadPoolExecutor, as_completed
 
-              api = '${HYPERFLEET_API_URL}'
-              clusters_json = '''${CLUSTERS_JSON}'''
+              api = os.environ['HYPERFLEET_API_URL']
               mc_placements = []
               dns_placements = []
 
+              clusters_json = sys.stdin.read()
               if clusters_json:
                   try:
                       clusters = json.loads(clusters_json)
-                      for cluster in clusters.get('items', []):
-                          cid = cluster.get('id', '')
-                          if not cid:
-                              continue
-                          try:
-                              url = f'{api}/api/hyperfleet/v1/clusters/{cid}/statuses'
-                              resp = urllib.request.urlopen(url, timeout=5)
-                              statuses = json.loads(resp.read())
-                              for s in statuses.get('items', []):
-                                  if s.get('adapter') != 'placement-adapter':
-                                      continue
-                                  data = s.get('data', {})
-                                  mc = data.get('managementClusterName', '')
-                                  domain = data.get('baseDomain', '')
-                                  if mc:
-                                      mc_placements.append(mc)
-                                  if domain:
-                                      dns_placements.append(domain)
-                                  break
-                          except Exception as e:
-                              sys.stderr.write(f'Failed to fetch statuses for {cid}: {e}\n')
+                      cids = [c['id'] for c in clusters.get('items', []) if c.get('id')]
+
+                      def fetch_status(cid):
+                          url = f'{api}/api/hyperfleet/v1/clusters/{cid}/statuses'
+                          resp = urllib.request.urlopen(url, timeout=5)
+                          return json.loads(resp.read())
+
+                      with ThreadPoolExecutor(max_workers=20) as executor:
+                          futures = {executor.submit(fetch_status, cid): cid for cid in cids}
+                          for future in as_completed(futures, timeout=60):
+                              cid = futures[future]
+                              try:
+                                  statuses = future.result()
+                                  for s in statuses.get('items', []):
+                                      if s.get('adapter') != 'placement-adapter':
+                                          continue
+                                      data = s.get('data', {})
+                                      mc = data.get('managementClusterName', '')
+                                      domain = data.get('baseDomain', '')
+                                      if mc:
+                                          mc_placements.append(mc)
+                                      if domain:
+                                          dns_placements.append(domain)
+                                      break
+                              except Exception as e:
+                                  sys.stderr.write(f'Failed to fetch statuses for {cid}: {e}\n')
                   except Exception as e:
                       sys.stderr.write(f'Failed to parse cluster list: {e}\n')
 
               print(json.dumps({'mc': mc_placements, 'dns': dns_placements}))
-              ")
+              " <<< "${CLUSTERS_JSON}")
               echo "Placement data collected"
 
               # ── Step 5: Select least-loaded MC (with capacity check) ──
@@ -286,7 +317,7 @@ spec:
                 --format='json(name,dnsName)' 2>/dev/null) || DNS_ZONES_JSON="[]"
 
               BASE_DOMAIN=$(python3 -c "
-              import json, sys, subprocess
+              import json, sys, os, subprocess
 
               dns_str = '${HC_DNS_DOMAINS}'
               project = '${GCP_PROJECT_ID}'
@@ -325,8 +356,14 @@ spec:
 
               sys.stderr.write(f'DNS record counts: {record_counts}\n')
 
-              # Capacity filter: exclude zones at or near quota (90% threshold)
-              threshold = int(quota * 0.9) if quota > 0 else 0
+              # Capacity filter: exclude zones at or near quota
+              try:
+                  capacity_pct = float(os.environ.get('DNS_CAPACITY_THRESHOLD_PCT', '0.9'))
+                  if not (0 < capacity_pct <= 1):
+                      capacity_pct = 0.9
+              except ValueError:
+                  capacity_pct = 0.9
+              threshold = int(quota * capacity_pct) if quota > 0 else 0
               available = []
               for d in domains:
                   if quota <= 0:
@@ -382,10 +419,12 @@ spec:
               value: "{{ .maestroUrl }}"
             - name: HYPERFLEET_API_URL
               value: "{{ .hyperfleetApiUrl }}"
+            - name: DNS_CAPACITY_THRESHOLD_PCT
+              value: "{{ .dnsCapacityThresholdPct }}"
           resources:
             requests:
               cpu: 100m
-              memory: 128Mi
+              memory: 256Mi
             limits:
               cpu: 500m
-              memory: 256Mi
+              memory: 512Mi

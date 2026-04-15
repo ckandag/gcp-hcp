@@ -74,12 +74,12 @@ spec:
     name: {{ .Values.gcpResources.pubsub.topic }}
 
 # Extra project-level IAM roles
-{{- range .Values.gcpResources.extraRoles }}
+{{- range $i, $r := .Values.gcpResources.extraRoles }}
 ---
 apiVersion: iam.cnrm.cloud.google.com/v1beta1
 kind: IAMPolicyMember
 metadata:
-  name: {{ $saName }}-{{ .role | replace "/" "-" | replace "roles-" "" | replace "." "-" | lower }}
+  name: {{ $saName }}-extra-{{ $i }}-{{ $r.role | replace "/" "-" | replace "roles-" "" | replace "." "-" | lower }}
   annotations:
     cnrm.cloud.google.com/project-id: {{ $projectId | quote }}
     argocd.argoproj.io/sync-wave: "-1"

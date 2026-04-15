@@ -42,13 +42,15 @@ hyperfleet-adapter:
         fieldRef:
           fieldPath: spec.serviceAccountName
     - name: GCP_PROJECT_ID
-      value: ""
+      value: ""  # REQUIRED: must be set via --set or values override at deploy time
     - name: MAESTRO_URL
       value: "http://maestro.hyperfleet.svc.cluster.local:8000"
     - name: HYPERFLEET_API_URL
       value: "http://hyperfleet-api.hyperfleet.svc.cluster.local:8000"
     - name: PLACEMENT_IMAGE
       value: "google/cloud-sdk:slim"
+    - name: DNS_CAPACITY_THRESHOLD_PCT
+      value: "0.9"
 
   rbac:
     resources:
@@ -62,7 +64,7 @@ hyperfleet-adapter:
 # Requires Config Connector installed on the cluster.
 gcpResources:
   enabled: true
-  projectId: ""
+  projectId: ""  # REQUIRED: same as broker.googlepubsub.projectId; set via --set or values override
 
   serviceAccount:
     name: placement-adapter

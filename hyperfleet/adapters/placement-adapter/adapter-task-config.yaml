@@ -58,6 +58,11 @@ params:
     type: "string"
     default: "google/cloud-sdk:slim"
 
+  - name: "dnsCapacityThresholdPct"
+    source: "env.DNS_CAPACITY_THRESHOLD_PCT"
+    type: "string"
+    default: "0.9"
+
 # ============================================================================
 # Phase 2: Preconditions
 #
