@@ -1,0 +1,86 @@
+hyperfleet-adapter:
+  image:
+    registry: quay.io/openshift-hyperfleet
+    repository: hyperfleet-adapter
+    pullPolicy: Always
+    tag: v0.2.0
+
+  adapterConfig:
+    create: true
+    # injected via ArgoCD fileParameters or --set-file at install time
+    hyperfleetApi:
+      baseUrl: http://hyperfleet-api.hyperfleet.svc.cluster.local:8000
+      version: v1
+    log:
+      level: info
+
+  adapterTaskConfig:
+    create: false
+    configMapName: placement-adapter-resources
+
+  broker:
+    create: true
+    googlepubsub:
+      projectId: ""
+      subscriptionId: hyperfleet-cluster-events-placement-adapter
+      topic: hyperfleet-cluster-events
+      createTopicIfMissing: false
+      createSubscriptionIfMissing: false
+
+  serviceAccount:
+    create: true
+    name: placement-adapter
+    annotations: {}
+
+  env:
+    - name: NAMESPACE
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+    - name: SERVICE_ACCOUNT
+      valueFrom:
+        fieldRef:
+          fieldPath: spec.serviceAccountName
+    - name: GCP_PROJECT_ID
+      value: ""  # REQUIRED: must be set via --set or values override at deploy time
+    - name: MAESTRO_URL
+      value: "http://maestro.hyperfleet.svc.cluster.local:8000"
+    - name: HYPERFLEET_API_URL
+      value: "http://hyperfleet-api.hyperfleet.svc.cluster.local:8000"
+    - name: PLACEMENT_IMAGE
+      value: "google/cloud-sdk:slim"
+    - name: DNS_CAPACITY_THRESHOLD_PCT
+      value: "0.9"
+
+  rbac:
+    resources:
+      - configmaps
+      - jobs
+      - jobs/status
+      - pods
+
+# Config Connector resources for this adapter's GCP infrastructure.
+# Creates: GCP SA, WIF binding, Pub/Sub subscription, IAM bindings.
+# Requires Config Connector installed on the cluster.
+gcpResources:
+  enabled: true
+  projectId: ""  # REQUIRED: same as broker.googlepubsub.projectId; set via --set or values override
+
+  serviceAccount:
+    name: placement-adapter
+    displayName: "Placement Adapter"
+    description: "GSA for HyperFleet placement adapter - Pub/Sub subscription and Secret Manager listing"
+
+  pubsub:
+    topic: hyperfleet-cluster-events
+    subscriptionName: hyperfleet-cluster-events-placement-adapter
+    ackDeadlineSeconds: 60
+    messageRetentionDuration: "604800s"
+
+  extraRoles:
+    - role: roles/secretmanager.viewer
+      scope: project
+    - role: roles/secretmanager.secretAccessor
+      scope: project
+    - role: roles/dns.reader
+      scope: project

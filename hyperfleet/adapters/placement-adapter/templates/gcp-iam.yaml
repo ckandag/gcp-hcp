@@ -1,0 +1,95 @@
+{{- if .Values.gcpResources.enabled }}
+{{- $projectId := .Values.gcpResources.projectId }}
+{{- $saName := .Values.gcpResources.serviceAccount.name }}
+{{- $gsaMember := printf "serviceAccount:%s@%s.iam.gserviceaccount.com" $saName $projectId }}
+{{- $ksaName := (index .Values "hyperfleet-adapter").serviceAccount.name }}
+{{- $namespace := .Release.Namespace }}
+
+# WIF binding — allows KSA {{ $ksaName }} to impersonate GSA {{ $saName }}
+---
+apiVersion: iam.cnrm.cloud.google.com/v1beta1
+kind: IAMPolicyMember
+metadata:
+  name: {{ $saName }}-wif
+  annotations:
+    cnrm.cloud.google.com/project-id: {{ $projectId | quote }}
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  member: serviceAccount:{{ $projectId }}.svc.id.goog[{{ $namespace }}/{{ $ksaName }}]
+  role: roles/iam.workloadIdentityUser
+  resourceRef:
+    apiVersion: iam.cnrm.cloud.google.com/v1beta1
+    kind: IAMServiceAccount
+    name: {{ $saName }}
+
+# Pub/Sub subscriber (subscription-level)
+---
+apiVersion: iam.cnrm.cloud.google.com/v1beta1
+kind: IAMPolicyMember
+metadata:
+  name: {{ $saName }}-pubsub-subscriber
+  annotations:
+    cnrm.cloud.google.com/project-id: {{ $projectId | quote }}
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  member: {{ $gsaMember }}
+  role: roles/pubsub.subscriber
+  resourceRef:
+    apiVersion: pubsub.cnrm.cloud.google.com/v1beta1
+    kind: PubSubSubscription
+    name: {{ .Values.gcpResources.pubsub.subscriptionName }}
+
+# Pub/Sub viewer (subscription-level, required for subscription.get)
+---
+apiVersion: iam.cnrm.cloud.google.com/v1beta1
+kind: IAMPolicyMember
+metadata:
+  name: {{ $saName }}-pubsub-viewer
+  annotations:
+    cnrm.cloud.google.com/project-id: {{ $projectId | quote }}
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  member: {{ $gsaMember }}
+  role: roles/pubsub.viewer
+  resourceRef:
+    apiVersion: pubsub.cnrm.cloud.google.com/v1beta1
+    kind: PubSubSubscription
+    name: {{ .Values.gcpResources.pubsub.subscriptionName }}
+
+# Pub/Sub viewer (topic-level, required for topic.get during subscription init)
+---
+apiVersion: iam.cnrm.cloud.google.com/v1beta1
+kind: IAMPolicyMember
+metadata:
+  name: {{ $saName }}-pubsub-topic-viewer
+  annotations:
+    cnrm.cloud.google.com/project-id: {{ $projectId | quote }}
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  member: {{ $gsaMember }}
+  role: roles/pubsub.viewer
+  resourceRef:
+    apiVersion: pubsub.cnrm.cloud.google.com/v1beta1
+    kind: PubSubTopic
+    name: {{ .Values.gcpResources.pubsub.topic }}
+
+# Extra project-level IAM roles
+{{- range $i, $r := .Values.gcpResources.extraRoles }}
+---
+apiVersion: iam.cnrm.cloud.google.com/v1beta1
+kind: IAMPolicyMember
+metadata:
+  name: {{ $saName }}-extra-{{ $i }}-{{ $r.role | replace "/" "-" | replace "roles-" "" | replace "." "-" | lower }}
+  annotations:
+    cnrm.cloud.google.com/project-id: {{ $projectId | quote }}
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  member: {{ $gsaMember }}
+  role: {{ .role }}
+  resourceRef:
+    apiVersion: resourcemanager.cnrm.cloud.google.com/v1beta1
+    kind: Project
+    external: projects/{{ $projectId }}
+{{- end }}
+
+{{- end }}
