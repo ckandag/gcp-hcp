@@ -104,7 +104,11 @@ Requires a full 4.22.x version (bare "4.22" is not accepted). Adding support for
 
 If `channelGroup` is not provided, default to the value of the `DEFAULT_CHANNEL_GROUP` environment variable (e.g., `"stable"` in production, `"candidate"` in integration).
 
-**1d. Validate that version is provided:**
+**1d. Default version when not provided:**
+
+If `version` is not provided, default to the value of the `DEFAULT_CLUSTER_VERSION` environment variable.
+
+**1e. Validate that version is provided:**
 
 The backend applies defaults (version, channelGroup) before validation. Reject the request if `release.version` is still empty after defaulting. Direct image specification is not supported — all clusters must go through Cincinnati-based version resolution.
 
