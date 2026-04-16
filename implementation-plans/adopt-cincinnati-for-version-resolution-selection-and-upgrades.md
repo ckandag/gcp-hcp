@@ -335,7 +335,7 @@ The implementation tasks above map to 3 stories:
 **Acceptance Criteria**:
 - [ ] `POST /api/v1/clusters` with `release.version: "4.22.0-ec.4"` stores version and channel group in spec
 - [ ] `POST /api/v1/clusters` with unsupported version (e.g., `4.21.3`) is rejected by API schema pattern
-- [ ] `channelGroup` defaults to `"stable"` via `DEFAULT_CHANNEL_GROUP` environment variable when not provided
+- [ ] `channelGroup` defaults to the configured `DEFAULT_CHANNEL_GROUP` value when not provided
 
 ### Story 2: CLS Controller — Version Resolution Controller and Template Updates
 
@@ -360,7 +360,7 @@ The implementation tasks above map to 3 stories:
 
 **Acceptance Criteria**:
 - [ ] `gcphcp clusters create --version 4.22.0-ec.4 --channel-group candidate` creates a cluster with the version in spec
-- [ ] `gcphcp clusters create --version 4.22.0` uses the default channel group (`stable`)
+- [ ] `gcphcp clusters create --version 4.22.0` uses the configured default channel group
 - [ ] `gcphcp clusters create` without `--version` succeeds (backend applies default version)
 
 ### Implementation Order
