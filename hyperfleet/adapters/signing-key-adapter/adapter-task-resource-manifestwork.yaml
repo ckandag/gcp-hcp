@@ -147,22 +147,20 @@ spec:
                       CA=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
                       API=https://kubernetes.default.svc
 
-                      # Idempotency: skip if secret already exists
-                      HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+                      # Step 1: Obtain the private key
+                      SECRET_EXISTED=false
+                      HTTP_CODE=$(curl -s -o /tmp/existing-secret.json -w "%{http_code}" \
                         --cacert "$CA" -H "Authorization: Bearer $TOKEN" \
                         "${API}/api/v1/namespaces/${NAMESPACE}/secrets/${SECRET_NAME}")
 
                       if [ "$HTTP_CODE" = "200" ]; then
-                        echo "Secret ${SECRET_NAME} already exists — skipping"
-                        exit 0
-                      fi
-
-                      # Step 1: Obtain the private key (provided or generated)
-                      if [ -n "${SIGNING_KEY_PEM}" ]; then
+                        echo "Secret ${SECRET_NAME} already exists — extracting key for OIDC upload"
+                        SECRET_EXISTED=true
+                        python3 -c "import json,base64,sys; d=json.load(open('/tmp/existing-secret.json')); sys.stdout.buffer.write(base64.b64decode(d['data']['key']))" > /tmp/sa-signer.key
+                      elif [ -n "${SIGNING_KEY_PEM}" ]; then
                         echo "Using caller-provided signing key..."
                         echo "${SIGNING_KEY_PEM}" | base64 -d > /tmp/sa-signer.key
 
-                        # Validate: must be a valid RSA private key in PKCS#1 format
                         if ! head -1 /tmp/sa-signer.key | grep -q "BEGIN RSA PRIVATE KEY"; then
                           echo "ERROR: Provided key is not in PKCS#1 format (expected BEGIN RSA PRIVATE KEY)"
                           echo "Got: $(head -1 /tmp/sa-signer.key)"
@@ -178,43 +176,45 @@ spec:
                         openssl genrsa 4096 2>/dev/null | openssl rsa -traditional -out /tmp/sa-signer.key 2>/dev/null
                       fi
 
-                      # Step 2: Create K8s Secret with private key
-                      KEY_B64=$(base64 -w 0 /tmp/sa-signer.key)
-                      HTTP_CODE=$(curl -s -o /tmp/create-result.json -w "%{http_code}" \
-                        --cacert "$CA" -H "Authorization: Bearer $TOKEN" \
-                        -H "Content-Type: application/json" -X POST \
-                        "${API}/api/v1/namespaces/${NAMESPACE}/secrets" \
-                        -d "{
-                          \"apiVersion\": \"v1\",
-                          \"kind\": \"Secret\",
-                          \"metadata\": {
-                            \"name\": \"${SECRET_NAME}\",
-                            \"namespace\": \"${NAMESPACE}\",
-                            \"labels\": {
-                              \"hyperfleet.io/cluster-id\": \"${CLUSTER_ID}\",
-                              \"hyperfleet.io/managed-by\": \"signing-key-adapter\",
-                              \"hyperfleet.io/resource-type\": \"signing-key\"
+                      # Step 2: Create K8s Secret (skip if already exists)
+                      if [ "$SECRET_EXISTED" = "false" ]; then
+                        KEY_B64=$(base64 -w 0 /tmp/sa-signer.key)
+                        HTTP_CODE=$(curl -s -o /tmp/create-result.json -w "%{http_code}" \
+                          --cacert "$CA" -H "Authorization: Bearer $TOKEN" \
+                          -H "Content-Type: application/json" -X POST \
+                          "${API}/api/v1/namespaces/${NAMESPACE}/secrets" \
+                          -d "{
+                            \"apiVersion\": \"v1\",
+                            \"kind\": \"Secret\",
+                            \"metadata\": {
+                              \"name\": \"${SECRET_NAME}\",
+                              \"namespace\": \"${NAMESPACE}\",
+                              \"labels\": {
+                                \"hyperfleet.io/cluster-id\": \"${CLUSTER_ID}\",
+                                \"hyperfleet.io/managed-by\": \"signing-key-adapter\",
+                                \"hyperfleet.io/resource-type\": \"signing-key\"
+                              },
+                              \"annotations\": {
+                                \"referenced-resource.hypershift.openshift.io/${CLUSTER_NAME}\": \"true\"
+                              }
                             },
-                            \"annotations\": {
-                              \"referenced-resource.hypershift.openshift.io/${CLUSTER_NAME}\": \"true\"
-                            }
-                          },
-                          \"type\": \"Opaque\",
-                          \"data\": { \"key\": \"${KEY_B64}\" }
-                        }")
+                            \"type\": \"Opaque\",
+                            \"data\": { \"key\": \"${KEY_B64}\" }
+                          }")
 
-                      if [ "$HTTP_CODE" != "201" ]; then
-                        echo "ERROR: Failed to create secret (HTTP ${HTTP_CODE})"
-                        cat /tmp/create-result.json
-                        exit 1
+                        if [ "$HTTP_CODE" != "201" ]; then
+                          echo "ERROR: Failed to create secret (HTTP ${HTTP_CODE})"
+                          cat /tmp/create-result.json
+                          exit 1
+                        fi
+                        echo "Secret ${SECRET_NAME} created successfully"
                       fi
-                      echo "Secret ${SECRET_NAME} created successfully"
 
                       # Step 3: JWKS/OIDC setup (only needed when key is generated, not when provided)
                       # When a signing key is provided externally, the caller is responsible for
                       # OIDC bucket creation and JWKS upload (e.g. via setup-infra.sh).
                       if [ -z "${SIGNING_KEY_PEM}" ]; then
-                        openssl rsa -in /tmp/sa-signer.key -pubout -out /tmp/sa-signer.pub 2>/dev/null
+                        openssl rsa -in /tmp/sa-signer.key -pubout -out /tmp/sa-signer.pub
 
                         echo "Generating JWKS and OIDC discovery documents..."
                         python3 -c "
@@ -277,13 +277,13 @@ spec:
                         echo "Uploading OIDC documents to ${OIDC_PREFIX}/"
 
                         gcloud storage cp /tmp/jwks.json "${OIDC_PREFIX}/openid/v1/jwks" \
-                          --content-type="application/json" 2>/dev/null || {
+                          --content-type="application/json" || {
                           echo "ERROR: Failed to upload JWKS to ${OIDC_PREFIX}/openid/v1/jwks"
                           exit 1
                         }
 
                         gcloud storage cp /tmp/openid-configuration "${OIDC_PREFIX}/.well-known/openid-configuration" \
-                          --content-type="application/json" 2>/dev/null || {
+                          --content-type="application/json" || {
                           echo "ERROR: Failed to upload OIDC discovery to ${OIDC_PREFIX}/.well-known/openid-configuration"
                           exit 1
                         }
