@@ -39,7 +39,9 @@ hyperfleet-adapter:
     - name: KEYGEN_IMAGE
       value: "google/cloud-sdk:slim"
     - name: KEYGEN_GCP_SA
-      value: ""
+      value: ""  # Required: GCP SA email for keygen Job WIF
+    - name: OIDC_BUCKET
+      value: ""  # Required: GCS bucket name for OIDC issuer docs
 
   rbac:
     resources:

@@ -117,12 +117,16 @@ spec:
                       value: "{{ .clusterId }}"
                     - name: CLUSTER_NAME
                       value: "{{ .clusterName }}"
+                    - name: INFRA_ID
+                      value: "{{ .infraID }}"
                     - name: NAMESPACE
                       value: "clusters-{{ .clusterId }}"
                     - name: SECRET_NAME
                       value: "{{ .clusterName }}-signing-key"
                     - name: ISSUER_URL
                       value: "{{ .issuerURL }}"
+                    - name: OIDC_BUCKET
+                      value: "{{ .oidcBucket }}"
                     - name: SIGNING_KEY_PEM
                       value: "{{ .signingKeyPEM }}"
                   command: ["/bin/bash", "-c"]
@@ -132,9 +136,11 @@ spec:
 
                       echo "=== Signing Key Generator ==="
                       echo "Cluster: ${CLUSTER_NAME} (${CLUSTER_ID})"
+                      echo "InfraID: ${INFRA_ID}"
                       echo "Namespace: ${NAMESPACE}"
                       echo "Secret: ${SECRET_NAME}"
                       echo "Issuer URL: ${ISSUER_URL}"
+                      echo "OIDC Bucket: ${OIDC_BUCKET}"
                       echo "Mode: $([ -n "${SIGNING_KEY_PEM}" ] && echo provided || echo generate)"
 
                       TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
@@ -210,9 +216,7 @@ spec:
                       if [ -z "${SIGNING_KEY_PEM}" ]; then
                         openssl rsa -in /tmp/sa-signer.key -pubout -out /tmp/sa-signer.pub 2>/dev/null
 
-                        ISSUER_BUCKET="${ISSUER_URL#https://storage.googleapis.com/}"
-                        echo "Generating JWKS for bucket: ${ISSUER_BUCKET}"
-
+                        echo "Generating JWKS and OIDC discovery documents..."
                         python3 -c "
                       import json, base64, hashlib, subprocess, os
 
@@ -254,7 +258,7 @@ spec:
                       issuer = os.environ['ISSUER_URL']
                       oidc = {
                           'issuer': issuer,
-                          'jwks_uri': issuer + '/keys.json',
+                          'jwks_uri': issuer + '/openid/v1/jwks',
                           'authorization_endpoint': 'urn:kubernetes:programmatic_authorization',
                           'response_types_supported': ['id_token'],
                           'subject_types_supported': ['public'],
@@ -262,22 +266,29 @@ spec:
                           'claims_supported': ['sub', 'iss'],
                       }
 
-                      with open('/tmp/keys.json', 'w') as f:
+                      with open('/tmp/jwks.json', 'w') as f:
                           json.dump(jwks, f, indent=2)
                       with open('/tmp/openid-configuration', 'w') as f:
                           json.dump(oidc, f, indent=2)
                       print('JWKS and OIDC discovery documents generated (kid: ' + kid[:12] + '...)')
                         "
 
-                        echo "Uploading OIDC documents to gs://${ISSUER_BUCKET}/"
-                        if gcloud storage cp /tmp/keys.json "gs://${ISSUER_BUCKET}/keys.json" 2>/dev/null && \
-                           gcloud storage cp /tmp/openid-configuration "gs://${ISSUER_BUCKET}/.well-known/openid-configuration" 2>/dev/null; then
-                          echo "OIDC documents uploaded successfully"
-                        else
-                          echo "WARNING: GCS upload skipped (no bucket access). Secret was created successfully."
-                          echo "JWKS upload can be done manually or once GCS IAM is configured."
-                        fi
+                        OIDC_PREFIX="gs://${OIDC_BUCKET}/${INFRA_ID}"
+                        echo "Uploading OIDC documents to ${OIDC_PREFIX}/"
 
+                        gcloud storage cp /tmp/jwks.json "${OIDC_PREFIX}/openid/v1/jwks" \
+                          --content-type="application/json" 2>/dev/null || {
+                          echo "ERROR: Failed to upload JWKS to ${OIDC_PREFIX}/openid/v1/jwks"
+                          exit 1
+                        }
+
+                        gcloud storage cp /tmp/openid-configuration "${OIDC_PREFIX}/.well-known/openid-configuration" \
+                          --content-type="application/json" 2>/dev/null || {
+                          echo "ERROR: Failed to upload OIDC discovery to ${OIDC_PREFIX}/.well-known/openid-configuration"
+                          exit 1
+                        }
+
+                        echo "OIDC documents uploaded successfully to ${OIDC_PREFIX}/"
                         rm -f /tmp/sa-signer.pub
                       else
                         echo "Skipping JWKS/OIDC setup — caller provided the signing key and is responsible for OIDC configuration"

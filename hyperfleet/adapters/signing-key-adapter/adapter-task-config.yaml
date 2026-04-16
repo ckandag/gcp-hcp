@@ -21,7 +21,13 @@ params:
     source: "env.KEYGEN_GCP_SA"
     type: "string"
     required: true
-    description: "GCP SA email for keygen Job WIF (needs GCS write access to issuer bucket)"
+    description: "GCP SA email for keygen Job WIF (needs GCS write access to OIDC bucket)"
+
+  - name: "oidcBucket"
+    source: "env.OIDC_BUCKET"
+    type: "string"
+    required: true
+    description: "GCS bucket name for OIDC issuer docs (private, served via proxy pod)"
 
 # ============================================================================
 # Phase 2: Preconditions - fetch cluster details from HyperFleet API
@@ -186,7 +192,7 @@ post:
                 && has(resources.keygenJob.statusFeedback.values)
                 && resources.keygenJob.statusFeedback.values.exists(v, has(v.name) && v.name == "succeeded")
                 ? (resources.keygenJob.statusFeedback.values.filter(v, v.name == "succeeded")[0].fieldValue.integer > 0
-                  ? "Signing key generated and JWKS published"
+                  ? "Signing key generated and OIDC documents published to bucket"
                   : "Keygen job has not completed yet")
                 : "Keygen job status not yet available"
 
