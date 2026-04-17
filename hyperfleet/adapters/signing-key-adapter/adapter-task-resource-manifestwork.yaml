@@ -278,75 +278,51 @@ spec:
                         OIDC_PREFIX="${INFRA_ID}"
                         echo "Uploading OIDC documents to gs://${OIDC_BUCKET}/${OIDC_PREFIX}/"
 
-                        # MC has metadata server concealment — gcloud can't discover
-                        # credentials. Use curl-based STS token exchange + GSA
-                        # impersonation to get an access token without metadata server.
-                        obtain_wif_access_token() {
+                        obtain_access_token() {
+                          # Try the GKE metadata server directly via curl (bypasses gcloud).
+                          # Works when WIF is enabled even if metadata concealment is on.
+                          echo "Requesting token from GKE metadata server..."
+                          local meta_resp meta_http
+                          meta_resp=$(curl -s -o /tmp/meta-token.json -w "%{http_code}" \
+                            -H "Metadata-Flavor: Google" \
+                            "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" \
+                            --connect-timeout 3 --max-time 5)
+                          if [ "${meta_resp}" = "200" ]; then
+                            WIF_ACCESS_TOKEN=$(sed -n 's/.*"access_token" *: *"\([^"]*\)".*/\1/p' /tmp/meta-token.json | head -1)
+                            if [ -n "${WIF_ACCESS_TOKEN}" ]; then
+                              echo "Got access token from GKE metadata server"
+                              rm -f /tmp/meta-token.json
+                              return 0
+                            fi
+                          fi
+                          echo "GKE metadata server unavailable (HTTP ${meta_resp})"
+                          cat /tmp/meta-token.json 2>/dev/null || true
+                          rm -f /tmp/meta-token.json
+
+                          # Fallback: impersonate the GSA via IAM Credentials API using
+                          # the projected K8s SA token directly. This works when the GSA
+                          # has workloadIdentityUser binding for this KSA.
                           local gcp_sa="${KEYGEN_GCP_SA}"
                           if [ -z "${gcp_sa}" ]; then
-                            echo "WARN: KEYGEN_GCP_SA not set, cannot perform WIF auth"
+                            echo "WARN: KEYGEN_GCP_SA not set, cannot impersonate"
                             return 1
                           fi
-
-                          # Extract MC project ID from the SA token's JWT issuer claim
-                          local jwt_b64 jwt_json iss_url mc_project
-                          jwt_b64=$(echo "$TOKEN" | cut -d. -f2)
-                          local pad=$((4 - ${#jwt_b64} % 4))
-                          [ "$pad" -lt 4 ] && jwt_b64="${jwt_b64}$(printf '=%.0s' $(seq 1 $pad))"
-                          jwt_json=$(echo "$jwt_b64" | base64 -d 2>/dev/null) || true
-                          iss_url=$(echo "$jwt_json" | sed -n 's/.*"iss" *: *"\([^"]*\)".*/\1/p' | head -1) || true
-
-                          if echo "$iss_url" | grep -q '/projects/'; then
-                            mc_project=$(echo "$iss_url" | sed 's|.*/projects/\([^/]*\).*|\1|')
-                          else
-                            mc_project=""
-                          fi
-
-                          if [ -z "${mc_project}" ]; then
-                            echo "WARN: Could not extract MC project from SA token (iss=$iss_url)"
-                            return 1
-                          fi
-                          echo "Detected MC project: ${mc_project}"
-
-                          # Step 1: STS token exchange — trade K8s SA token for federated token
-                          local sa_token sts_body sts_response sts_token
+                          echo "Trying direct GSA impersonation with K8s SA token..."
+                          local sa_token imp_response
                           sa_token=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
-                          sts_body=$(printf '{"grant_type":"urn:ietf:params:oauth:grant-type:token-exchange","audience":"identitynamespace:%s.svc.id.goog:%s/keygen-sa","scope":"https://www.googleapis.com/auth/cloud-platform","requested_token_type":"urn:ietf:params:oauth:token-type:access_token","subject_token_type":"urn:ietf:params:oauth:token-type:jwt"}' \
-                            "${mc_project}" "${NAMESPACE}")
-                          echo "$sa_token" > /tmp/sts-subject-token.txt
-                          local full_sts_body
-                          full_sts_body=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); d['subject_token']=open('/tmp/sts-subject-token.txt').read().strip(); print(json.dumps(d))" "${sts_body}")
-
-                          echo "Exchanging K8s SA token with STS..."
-                          sts_response=$(curl -s -X POST "https://sts.googleapis.com/v1/token" \
-                            -H "Content-Type: application/json" \
-                            -d "${full_sts_body}")
-                          sts_token=$(echo "$sts_response" | sed -n 's/.*"access_token" *: *"\([^"]*\)".*/\1/p' | head -1) || true
-                          rm -f /tmp/sts-subject-token.txt
-
-                          if [ -z "$sts_token" ]; then
-                            echo "WARN: STS token exchange failed"
-                            echo "$sts_response"
-                            return 1
-                          fi
-                          echo "STS token exchange succeeded"
-
-                          # Step 2: Impersonate GSA to get a GCP access token
-                          local imp_response
                           imp_response=$(curl -s -X POST \
                             "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${gcp_sa}:generateAccessToken" \
-                            -H "Authorization: Bearer ${sts_token}" \
+                            -H "Authorization: Bearer ${sa_token}" \
                             -H "Content-Type: application/json" \
                             -d '{"scope":["https://www.googleapis.com/auth/cloud-platform"]}')
                           WIF_ACCESS_TOKEN=$(echo "$imp_response" | sed -n 's/.*"accessToken" *: *"\([^"]*\)".*/\1/p' | head -1) || true
-
-                          if [ -z "$WIF_ACCESS_TOKEN" ]; then
-                            echo "WARN: GSA impersonation failed"
-                            echo "$imp_response"
-                            return 1
+                          if [ -n "$WIF_ACCESS_TOKEN" ]; then
+                            echo "GCP access token obtained via direct impersonation"
+                            return 0
                           fi
-                          echo "GCP access token obtained via WIF"
-                          return 0
+                          echo "WARN: Direct impersonation failed"
+                          echo "$imp_response"
+                          return 1
                         }
 
                         upload_to_gcs() {
@@ -370,14 +346,14 @@ spec:
 
                         UPLOAD_OK=false
 
-                        # --- Attempt 1: WIF (STS + impersonation) then curl upload ---
-                        if obtain_wif_access_token; then
-                          echo "Uploading via GCS JSON API with WIF token..."
+                        # --- Attempt 1: get token then curl upload ---
+                        if obtain_access_token; then
+                          echo "Uploading via GCS JSON API..."
                           if upload_to_gcs /tmp/jwks.json "${OIDC_PREFIX}/openid/v1/jwks" "${WIF_ACCESS_TOKEN}" && \
                              upload_to_gcs /tmp/openid-configuration "${OIDC_PREFIX}/.well-known/openid-configuration" "${WIF_ACCESS_TOKEN}"; then
                             UPLOAD_OK=true
                           else
-                            echo "WARN: WIF curl upload failed"
+                            echo "WARN: curl upload failed"
                           fi
                         fi
 
