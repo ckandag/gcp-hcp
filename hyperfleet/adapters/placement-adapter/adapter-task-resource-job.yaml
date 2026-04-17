@@ -246,12 +246,13 @@ spec:
               echo "Placement data collected"
 
               # ── Step 5: Select least-loaded MC (with capacity check) ──
-              SELECTED=$(python3 -c "
-              import json, sys
+              SELECTED=$(ELIGIBLE="${ELIGIBLE}" MC_CAPS_JSON="${MC_CAPS_JSON}" \
+                PLACEMENT_DATA="${PLACEMENT_DATA}" python3 -c "
+              import json, sys, os
 
-              eligible = '''${ELIGIBLE}'''.strip().split('\n')
-              mc_caps = json.loads('${MC_CAPS_JSON}')
-              placement_data = json.loads('''${PLACEMENT_DATA}''')
+              eligible = os.environ['ELIGIBLE'].strip().split('\n')
+              mc_caps = json.loads(os.environ['MC_CAPS_JSON'])
+              placement_data = json.loads(os.environ['PLACEMENT_DATA'])
 
               mc_counts = {mc: 0 for mc in eligible}
               for mc in placement_data.get('mc', []):
@@ -318,15 +319,17 @@ spec:
                 --project="${GCP_PROJECT_ID}" \
                 --format='json(name,dnsName)' 2>/dev/null) || DNS_ZONES_JSON="[]"
 
-              BASE_DOMAIN=$(python3 -c "
+              BASE_DOMAIN=$(HC_DNS_DOMAINS="${HC_DNS_DOMAINS}" DNS_QUOTA="${DNS_QUOTA}" \
+                DNS_ZONES_JSON="${DNS_ZONES_JSON}" PLACEMENT_DATA="${PLACEMENT_DATA}" \
+                python3 -c "
               import json, sys, os, subprocess
 
-              dns_str = '${HC_DNS_DOMAINS}'
-              project = '${GCP_PROJECT_ID}'
-              quota = int('${DNS_QUOTA}') if '${DNS_QUOTA}'.isdigit() else 0
+              dns_str = os.environ['HC_DNS_DOMAINS']
+              project = os.environ['GCP_PROJECT_ID']
+              quota = int(os.environ['DNS_QUOTA']) if os.environ.get('DNS_QUOTA', '').isdigit() else 0
               domains = [d.strip() for d in dns_str.split(',') if d.strip()]
-              zones_json = json.loads('''${DNS_ZONES_JSON}''')
-              placement_data = json.loads('''${PLACEMENT_DATA}''')
+              zones_json = json.loads(os.environ['DNS_ZONES_JSON'])
+              placement_data = json.loads(os.environ['PLACEMENT_DATA'])
 
               # Map each domain to its zone name via dnsName match
               domain_to_zone = {}
