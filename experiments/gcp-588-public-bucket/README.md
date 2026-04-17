@@ -209,10 +209,74 @@ since it's per-region infrastructure. Components:
 5. Google-managed SSL certificate
 6. DNS record (optional, for custom domain like `oidc.{region}.gcp-hcp.devshift.net`)
 
+## Option C: OIDC Proxy Pod (Workaround -- No Org Policy Change Needed)
+
+While waiting for the org policy change, we can deploy a lightweight nginx pod in the MC GKE
+cluster that reads from the private bucket via Workload Identity and serves the documents
+publicly through a GKE Ingress.
+
+```
+GCP STS / Any Client
+        │
+        ▼  (HTTPS)
+GKE Ingress (Google-managed ManagedCertificate + global static IP)
+        │
+        ▼  (HTTP)
+K8s Service (ClusterIP:80)
+        │
+        ▼
+Pod: nginx (serves static files from GCS Fuse mount)
+        │
+        ▼  (authenticated via Workload Identity)
+Private GCS Bucket
+  ├── {infraID}/.well-known/openid-configuration
+  └── {infraID}/openid/v1/jwks
+```
+
+### Why This Works
+
+- **No org policy conflict**: Workload Identity uses `{GSA}@{PROJECT}.iam.gserviceaccount.com`
+  which IS in the allowed domain. No `allUsers` or `cloud-cdn-fill` SA needed.
+- **No custom code**: Pure nginx + GCS Fuse CSI driver (built into GKE Autopilot).
+- **Live data**: GCS Fuse mounts the bucket as a filesystem -- changes to bucket objects are
+  reflected without pod restarts.
+
+### Components
+
+| Resource | Type | Details |
+|----------|------|---------|
+| GCS Bucket | Private | Stores OIDC docs, uniform bucket-level access |
+| GCP SA | `oidc-proxy@{PROJECT}` | `roles/storage.objectViewer` on bucket |
+| K8s SA | `oidc-proxy` | WI annotation binding to GCP SA |
+| Deployment | `oidc-proxy` | 2 replicas, nginx + GCS Fuse CSI sidecar |
+| ConfigMap | `oidc-proxy-nginx-conf` | nginx config with JSON content-type + health check |
+| Service | `oidc-proxy` | ClusterIP:80 |
+| Ingress | `oidc-proxy` | Global static IP + ManagedCertificate |
+| ManagedCertificate | `oidc-proxy-cert` | Google-managed cert for OIDC FQDN |
+| Static IP | `oidc-proxy-ip` | Global external IP |
+| DNS A record | `oidc.{DNS_DOMAIN}` | Points to static IP (in region project DNS zone) |
+
+### Test Scripts
+
+- `setup-proxy-test.sh` -- Deploys proxy pod with GCS Fuse, Ingress, cert, DNS
+- `cleanup-proxy-test.sh` -- Tears down all proxy resources
+
+### Comparison with CDN Approach
+
+| Aspect | CDN (blocked by org policy) | Proxy Pod (workaround) |
+|--------|-----------------------------|------------------------|
+| Org policy | Requires change | No change needed |
+| Infrastructure | Global LB + CDN + backend bucket | Pod + GKE Ingress |
+| Latency | CDN edge cache (sub-ms) | Pod in-region (~few ms) |
+| Cost | ~$18/mo forwarding rule | Pod resources + Ingress |
+| Production-ready | Yes (once unblocked) | Good for dev/test, could serve production with HA |
+
 ## Test Scripts
 
 - `setup-cdn-test.sh` -- Creates a test bucket, uploads sample OIDC content, sets up CDN + LB
-- `cleanup-cdn-test.sh` -- Tears down all test resources
+- `cleanup-cdn-test.sh` -- Tears down all CDN test resources
+- `setup-proxy-test.sh` -- Deploys nginx proxy pod with GCS Fuse + Ingress (no org policy change)
+- `cleanup-proxy-test.sh` -- Tears down all proxy test resources
 
 ## Test Results (2026-04-13)
 
@@ -251,6 +315,9 @@ Either option requires an org policy update to `constraints/iam.allowedPolicyMem
 - **Option A**: Add conditional tag exception allowing `allUsers` on tagged buckets
 - **Option B**: Add `cloud-cdn-fill.iam.gserviceaccount.com` to the allowed domains
 
+**Action item**: cblecker to determine feasibility and request the org policy change.
+Both options should be tested once the policy is updated.
+
 ### Key Learnings
 
 - The `cloud-cdn-fill` SA is **not** auto-created with `compute.googleapis.com`. It requires
@@ -263,6 +330,61 @@ Either option requires an org policy update to `constraints/iam.allowedPolicyMem
 
 ```bash
 ./cleanup-cdn-test.sh dev-mgt-us-c1-ckandagb3fc
+```
+
+## Proxy Pod Test Results (2026-04-16)
+
+Tested against project `dev-mgt-us-c1-ckandagb3fc` (dev MC project, GKE Autopilot).
+
+### What Worked
+
+1. Created private GCS bucket with OIDC content
+2. Created GCP SA `oidc-proxy@dev-mgt-us-c1-ckandagb3fc.iam.gserviceaccount.com`
+3. Granted GSA `roles/storage.objectViewer` on the bucket (no org policy issue)
+4. Created K8s SA with Workload Identity binding to GSA
+5. Deployed nginx with GCS Fuse CSI volume -- 2/2 pods Running (nginx + gcsfuse sidecar)
+6. Created ClusterIP service + GKE Ingress with global static IP (`136.110.231.166`)
+7. DNS A record: `oidc.dev-reg-us-c1-ckandagb3fc.dev.gcp-hcp.devshift.net` -> `136.110.231.166`
+8. ManagedCertificate provisioning for HTTPS
+
+### Verified
+
+HTTP access works immediately -- both OIDC discovery and JWKS documents served correctly:
+
+```bash
+# Via external IP
+curl -s http://136.110.231.166/test-cluster/.well-known/openid-configuration | jq .
+curl -s http://136.110.231.166/test-cluster/openid/v1/jwks | jq .
+
+# Via DNS hostname
+curl -s http://oidc.dev-reg-us-c1-ckandagb3fc.dev.gcp-hcp.devshift.net/test-cluster/.well-known/openid-configuration | jq .
+```
+
+HTTPS works after ManagedCertificate became Active (~7 min):
+
+```bash
+curl -s https://oidc.dev-reg-us-c1-ckandagb3fc.dev.gcp-hcp.devshift.net/test-cluster/.well-known/openid-configuration | jq .
+curl -s https://oidc.dev-reg-us-c1-ckandagb3fc.dev.gcp-hcp.devshift.net/test-cluster/openid/v1/jwks | jq .
+```
+
+TLS certificate: `CN=oidc.dev-reg-us-c1-ckandagb3fc.dev.gcp-hcp.devshift.net`,
+issued by Google Trust Services (WR3), valid through July 2026.
+
+### Key Learnings
+
+- GKE Autopilot has GCS Fuse CSI driver available by default -- no addon to enable.
+- Private GKE clusters require `--dns-endpoint` flag for `gcloud container clusters get-credentials`
+  to access the cluster from outside the VPC.
+- The `gke-gcsfuse/volumes: "true"` pod annotation injects a sidecar container automatically.
+- Workload Identity binding uses the project's own domain, so
+  `constraints/iam.allowedPolicyMemberDomains` is NOT triggered.
+- The GKE Ingress creates its own forwarding rules, URL map, and target proxy automatically --
+  no manual compute resource management needed.
+
+### Resources to Clean Up
+
+```bash
+./cleanup-proxy-test.sh dev-mgt-us-c1-ckandagb3fc
 ```
 
 ## References
