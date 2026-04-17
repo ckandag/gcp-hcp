@@ -278,19 +278,17 @@ spec:
                         OIDC_PREFIX="${INFRA_ID}"
                         echo "Uploading OIDC documents to gs://${OIDC_BUCKET}/${OIDC_PREFIX}/"
 
-                        # MC has metadata server concealment — gcloud can't auto-discover
-                        # credentials.  Build a WIF credential config from the projected
-                        # SA token so gcloud handles the STS exchange internally.
-                        setup_wif_credentials() {
+                        # MC has metadata server concealment — gcloud can't discover
+                        # credentials. Use curl-based STS token exchange + GSA
+                        # impersonation to get an access token without metadata server.
+                        obtain_wif_access_token() {
                           local gcp_sa="${KEYGEN_GCP_SA}"
                           if [ -z "${gcp_sa}" ]; then
-                            echo "WARN: KEYGEN_GCP_SA not set, cannot build WIF credential config"
+                            echo "WARN: KEYGEN_GCP_SA not set, cannot perform WIF auth"
                             return 1
                           fi
 
-                          # Extract MC GKE project ID from the SA token's issuer claim.
-                          # JWT format: header.payload.signature — decode the payload (base64url).
-                          # Issuer format: https://container.googleapis.com/v1/projects/PROJECT/locations/...
+                          # Extract MC project ID from the SA token's JWT issuer claim
                           local jwt_b64 jwt_json iss_url mc_project
                           jwt_b64=$(echo "$TOKEN" | cut -d. -f2)
                           local pad=$((4 - ${#jwt_b64} % 4))
@@ -310,25 +308,56 @@ spec:
                           fi
                           echo "Detected MC project: ${mc_project}"
 
-                          # Write the WIF credential config as JSON
-                          printf '{"type":"external_account","audience":"identitynamespace:%s.svc.id.goog:%s/keygen-sa","subject_token_type":"urn:ietf:params:oauth:token-type:jwt","token_url":"https://sts.googleapis.com/v1/token","credential_source":{"file":"/var/run/secrets/kubernetes.io/serviceaccount/token","format":{"type":"text"}},"service_account_impersonation_url":"https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/%s:generateAccessToken","service_account_impersonation":{"token_lifetime_seconds":600}}\n' \
-                            "${mc_project}" "${NAMESPACE}" "${gcp_sa}" > /tmp/gcp-wif-creds.json
-                          export GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcp-wif-creds.json
-                          echo "WIF credential config written to /tmp/gcp-wif-creds.json"
+                          # Step 1: STS token exchange — trade K8s SA token for federated token
+                          local sa_token sts_body sts_response sts_token
+                          sa_token=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+                          sts_body=$(printf '{"grant_type":"urn:ietf:params:oauth:grant-type:token-exchange","audience":"identitynamespace:%s.svc.id.goog:%s/keygen-sa","scope":"https://www.googleapis.com/auth/cloud-platform","requested_token_type":"urn:ietf:params:oauth:token-type:access_token","subject_token_type":"urn:ietf:params:oauth:token-type:jwt"}' \
+                            "${mc_project}" "${NAMESPACE}")
+                          echo "$sa_token" > /tmp/sts-subject-token.txt
+                          local full_sts_body
+                          full_sts_body=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); d['subject_token']=open('/tmp/sts-subject-token.txt').read().strip(); print(json.dumps(d))" "${sts_body}")
+
+                          echo "Exchanging K8s SA token with STS..."
+                          sts_response=$(curl -s -X POST "https://sts.googleapis.com/v1/token" \
+                            -H "Content-Type: application/json" \
+                            -d "${full_sts_body}")
+                          sts_token=$(echo "$sts_response" | sed -n 's/.*"access_token" *: *"\([^"]*\)".*/\1/p' | head -1) || true
+                          rm -f /tmp/sts-subject-token.txt
+
+                          if [ -z "$sts_token" ]; then
+                            echo "WARN: STS token exchange failed"
+                            echo "$sts_response"
+                            return 1
+                          fi
+                          echo "STS token exchange succeeded"
+
+                          # Step 2: Impersonate GSA to get a GCP access token
+                          local imp_response
+                          imp_response=$(curl -s -X POST \
+                            "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${gcp_sa}:generateAccessToken" \
+                            -H "Authorization: Bearer ${sts_token}" \
+                            -H "Content-Type: application/json" \
+                            -d '{"scope":["https://www.googleapis.com/auth/cloud-platform"]}')
+                          WIF_ACCESS_TOKEN=$(echo "$imp_response" | sed -n 's/.*"accessToken" *: *"\([^"]*\)".*/\1/p' | head -1) || true
+
+                          if [ -z "$WIF_ACCESS_TOKEN" ]; then
+                            echo "WARN: GSA impersonation failed"
+                            echo "$imp_response"
+                            return 1
+                          fi
+                          echo "GCP access token obtained via WIF"
                           return 0
                         }
 
-                        # Try GCS upload using curl with a manually-obtained access token,
-                        # falling back to gcloud if the credential config works.
                         upload_to_gcs() {
-                          local src_file="$1" dst_object="$2" token="$3"
+                          local src_file="$1" dst_object="$2" access_token="$3"
                           local encoded_object
                           encoded_object=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "${dst_object}")
                           local http_code
                           http_code=$(curl -s -o /tmp/gcs-upload-result.json -w "%{http_code}" \
                             -X POST \
                             "https://storage.googleapis.com/upload/storage/v1/b/${OIDC_BUCKET}/o?uploadType=media&name=${encoded_object}" \
-                            -H "Authorization: Bearer ${token}" \
+                            -H "Authorization: Bearer ${access_token}" \
                             -H "Content-Type: application/json" \
                             --data-binary @"${src_file}")
                           if [ "${http_code}" != "200" ]; then
@@ -341,44 +370,24 @@ spec:
 
                         UPLOAD_OK=false
 
-                        # --- Attempt 1: Build WIF cred config and use gcloud ---
-                        if setup_wif_credentials; then
-                          echo "Attempting upload with WIF credential config + gcloud..."
+                        # --- Attempt 1: WIF (STS + impersonation) then curl upload ---
+                        if obtain_wif_access_token; then
+                          echo "Uploading via GCS JSON API with WIF token..."
+                          if upload_to_gcs /tmp/jwks.json "${OIDC_PREFIX}/openid/v1/jwks" "${WIF_ACCESS_TOKEN}" && \
+                             upload_to_gcs /tmp/openid-configuration "${OIDC_PREFIX}/.well-known/openid-configuration" "${WIF_ACCESS_TOKEN}"; then
+                            UPLOAD_OK=true
+                          else
+                            echo "WARN: WIF curl upload failed"
+                          fi
+                        fi
+
+                        # --- Attempt 2: Plain gcloud (for envs without concealment) ---
+                        if [ "${UPLOAD_OK}" = "false" ]; then
+                          echo "Fallback: plain gcloud storage cp..."
                           if gcloud storage cp /tmp/jwks.json "gs://${OIDC_BUCKET}/${OIDC_PREFIX}/openid/v1/jwks" \
                                --content-type="application/json" 2>&1 && \
                              gcloud storage cp /tmp/openid-configuration "gs://${OIDC_BUCKET}/${OIDC_PREFIX}/.well-known/openid-configuration" \
                                --content-type="application/json" 2>&1; then
-                            UPLOAD_OK=true
-                          else
-                            echo "WARN: gcloud with WIF credential config failed, trying curl fallback..."
-                          fi
-                        fi
-
-                        # --- Attempt 2: Use gcloud print-access-token then curl ---
-                        if [ "${UPLOAD_OK}" = "false" ]; then
-                          echo "Attempting to obtain access token via gcloud..."
-                          ACCESS_TOKEN=$(gcloud auth print-access-token 2>/dev/null) || true
-                          if [ -n "${ACCESS_TOKEN}" ]; then
-                            echo "Access token obtained, uploading via GCS JSON API..."
-                            if upload_to_gcs /tmp/jwks.json "${OIDC_PREFIX}/openid/v1/jwks" "${ACCESS_TOKEN}" && \
-                               upload_to_gcs /tmp/openid-configuration "${OIDC_PREFIX}/.well-known/openid-configuration" "${ACCESS_TOKEN}"; then
-                              UPLOAD_OK=true
-                            fi
-                          else
-                            echo "WARN: Could not obtain access token"
-                          fi
-                        fi
-
-                        # --- Attempt 3: Direct gcloud (no credential config) ---
-                        if [ "${UPLOAD_OK}" = "false" ]; then
-                          echo "Last resort: plain gcloud storage cp..."
-                          unset GOOGLE_APPLICATION_CREDENTIALS
-                          gcloud storage cp /tmp/jwks.json "gs://${OIDC_BUCKET}/${OIDC_PREFIX}/openid/v1/jwks" \
-                            --content-type="application/json" || true
-                          gcloud storage cp /tmp/openid-configuration "gs://${OIDC_BUCKET}/${OIDC_PREFIX}/.well-known/openid-configuration" \
-                            --content-type="application/json" || true
-                          # Check if files appeared
-                          if gcloud storage ls "gs://${OIDC_BUCKET}/${OIDC_PREFIX}/openid/v1/jwks" 2>/dev/null; then
                             UPLOAD_OK=true
                           fi
                         fi
