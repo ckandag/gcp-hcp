@@ -289,45 +289,30 @@ spec:
                           fi
 
                           # Extract MC GKE project ID from the SA token's issuer claim.
-                          # Format: https://container.googleapis.com/v1/projects/PROJECT/locations/...
-                          local mc_project
-                          mc_project=$(python3 -c "
-import json, base64, sys
-token = open('/var/run/secrets/kubernetes.io/serviceaccount/token').read()
-parts = token.split('.')
-padded = parts[1] + '=' * (4 - len(parts[1]) % 4)
-payload = json.loads(base64.urlsafe_b64decode(padded))
-iss = payload.get('iss', '')
-if '/projects/' in iss:
-    print(iss.split('/projects/')[1].split('/')[0])
-else:
-    print('')
-" 2>/dev/null) || true
+                          # JWT format: header.payload.signature — decode the payload (base64url).
+                          # Issuer format: https://container.googleapis.com/v1/projects/PROJECT/locations/...
+                          local jwt_b64 jwt_json iss_url mc_project
+                          jwt_b64=$(echo "$TOKEN" | cut -d. -f2)
+                          local pad=$((4 - ${#jwt_b64} % 4))
+                          [ "$pad" -lt 4 ] && jwt_b64="${jwt_b64}$(printf '=%.0s' $(seq 1 $pad))"
+                          jwt_json=$(echo "$jwt_b64" | base64 -d 2>/dev/null) || true
+                          iss_url=$(echo "$jwt_json" | sed -n 's/.*"iss" *: *"\([^"]*\)".*/\1/p' | head -1) || true
+
+                          if echo "$iss_url" | grep -q '/projects/'; then
+                            mc_project=$(echo "$iss_url" | sed 's|.*/projects/\([^/]*\).*|\1|')
+                          else
+                            mc_project=""
+                          fi
 
                           if [ -z "${mc_project}" ]; then
-                            echo "WARN: Could not extract MC project from SA token"
+                            echo "WARN: Could not extract MC project from SA token (iss=$iss_url)"
                             return 1
                           fi
                           echo "Detected MC project: ${mc_project}"
 
-                          # Write the credential config that lets gcloud handle WIF
-                          python3 -c "
-import json
-cfg = {
-    'type': 'external_account',
-    'audience': 'identitynamespace:${mc_project}.svc.id.goog:${NAMESPACE}/keygen-sa',
-    'subject_token_type': 'urn:ietf:params:oauth:token-type:jwt',
-    'token_url': 'https://sts.googleapis.com/v1/token',
-    'credential_source': {
-        'file': '/var/run/secrets/kubernetes.io/serviceaccount/token',
-        'format': {'type': 'text'}
-    },
-    'service_account_impersonation_url': 'https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${gcp_sa}:generateAccessToken',
-    'service_account_impersonation': {'token_lifetime_seconds': 600}
-}
-with open('/tmp/gcp-wif-creds.json', 'w') as f:
-    json.dump(cfg, f, indent=2)
-"
+                          # Write the WIF credential config as JSON
+                          printf '{"type":"external_account","audience":"identitynamespace:%s.svc.id.goog:%s/keygen-sa","subject_token_type":"urn:ietf:params:oauth:token-type:jwt","token_url":"https://sts.googleapis.com/v1/token","credential_source":{"file":"/var/run/secrets/kubernetes.io/serviceaccount/token","format":{"type":"text"}},"service_account_impersonation_url":"https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/%s:generateAccessToken","service_account_impersonation":{"token_lifetime_seconds":600}}\n' \
+                            "${mc_project}" "${NAMESPACE}" "${gcp_sa}" > /tmp/gcp-wif-creds.json
                           export GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcp-wif-creds.json
                           echo "WIF credential config written to /tmp/gcp-wif-creds.json"
                           return 0
