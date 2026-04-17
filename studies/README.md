@@ -53,6 +53,11 @@ Studies should include:
 
 ## Active Studies
 
+### Federated Authentication from OpenShift/ROSA to GCP
+**File**: `rosa-to-gcp-wif.md`
+**Status**: Validated with working example
+**Topic**: Setting up GCP Workload Identity Federation to trust an OpenShift/ROSA cluster's OIDC issuer, enabling pods to authenticate to GCP without static credentials
+
 ### WIF Service Account Key Management
 **File**: `wif-sa-key-management.md`
 **Status**: Research complete, ready for team discussion
