@@ -68,6 +68,11 @@ Studies should include:
 **Status**: Research complete, ready for team discussion
 **Topic**: Secure management of service account signing keys for Workload Identity Federation
 
+### `e2e-v2-gke` Known Failure Patterns
+**File**: `e2e-v2-gke-failure-patterns.md`
+**Status**: Living document, updated as new patterns are observed
+**Topic**: Analysis of recurring, non-code failure modes on the `pull-ci-openshift-hypershift-main-e2e-v2-gke` Prow job — signatures, root causes, and possible remedies for CI infrastructure flakiness (DNS resolution, build farm capacity, deployment timeouts, etc.) versus genuine test/product regressions
+
 ## Naming Conventions
 
 - Use kebab-case: `my-study-topic.md`
